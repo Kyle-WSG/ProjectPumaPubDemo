@@ -2,7 +2,7 @@ name: project-puma
 channels:
   - snowflake
 dependencies:
-  - python=3.12
+  - python=3.11
   - snowflake-snowpark-python
   - pandas=2.*
   - python-dateutil
