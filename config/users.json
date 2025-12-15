@@ -1,3 +1,6 @@
-{
-  "users": ["Kyle", "Operator 1", "Operator 2", "Supervisor"]
-}
+[
+  "Kyle",
+  "Operator 1",
+  "Operator 2",
+  "Supervisor"
+]
