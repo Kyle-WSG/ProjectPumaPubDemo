@@ -1,4 +1,4 @@
-name: projectpuma
+name: project-puma
 channels:
   - snowflake
 dependencies:
