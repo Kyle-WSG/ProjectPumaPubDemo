@@ -2,9 +2,7 @@ name: project-puma
 channels:
   - snowflake
 dependencies:
-  - python=3.10
-  - streamlit=1.51.0
-  - pandas=2.*
-  - plotly=5.*
-  - python-dateutil
+  - python=3.12
   - snowflake-snowpark-python
+  - pandas=2.*
+  - python-dateutil
