@@ -1,0 +1,10 @@
+name: projectpuma
+channels:
+  - snowflake
+dependencies:
+  - python=3.11
+  - streamlit=1.50.0
+  - pandas=2.*
+  - plotly=5.0.*
+  - python-dateutil
+  - snowflake-snowpark-python
