@@ -26,7 +26,16 @@ def load_json_list(path: str, fallback):
     if not p.exists():
         return fallback
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        # Allow either a bare list or a dict wrapper like {"vehicles": [...]}.
+        if isinstance(data, dict):
+            for key in ("vehicles", "items", "values", "data"):
+                if key in data and isinstance(data[key], list):
+                    data = data[key]
+                    break
+        if isinstance(data, list):
+            return data
+        return fallback
     except Exception:
         return fallback
 

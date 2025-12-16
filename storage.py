@@ -60,6 +60,24 @@ def _sqlite_cols(conn: sqlite3.Connection, table: str) -> List[str]:
     rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
     return [r["name"] for r in rows]
 
+def _sqlite_shift_user(conn: sqlite3.Connection, shift_id: int) -> str:
+    cols = set(_sqlite_cols(conn, "shifts"))
+    user_col = "username" if "username" in cols else ("active_user" if "active_user" in cols else None)
+    if user_col is None:
+        return ""
+    row = conn.execute(f"SELECT {user_col} FROM shifts WHERE id=?", (int(shift_id),)).fetchone()
+    if not row:
+        return ""
+    return row[0] if row[0] else ""
+
+def _sqlite_activity_schema(conn: sqlite3.Connection) -> str:
+    cols = set(_sqlite_cols(conn, "activities"))
+    if "start_ts" in cols:
+        return "new"
+    if "start_time" in cols:
+        return "legacy"
+    raise sqlite3.OperationalError("activities table schema not recognized")
+
 def init_storage() -> None:
     if backend() == "snowflake":
         s = _try_get_sf_session()
@@ -181,12 +199,35 @@ def get_shift(shift_date: date, shift_type: str, username: str) -> Optional[Dict
         }
 
     conn = _sqlite_conn()
-    row = conn.execute(
-        "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
-        (shift_date.isoformat(), shift_type, username),
-    ).fetchone()
+    cols = set(_sqlite_cols(conn, "shifts"))
+
+    row = None
+    if "username" in cols:
+        row = conn.execute(
+            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
+            (shift_date.isoformat(), shift_type, username),
+        ).fetchone()
+
+    if row is None and "active_user" in cols:
+        row = conn.execute(
+            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? AND active_user=?",
+            (shift_date.isoformat(), shift_type, username),
+        ).fetchone()
+
+    if row is None and "username" in cols:
+        row = conn.execute(
+            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (shift_date.isoformat(), shift_type),
+        ).fetchone()
+
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+
+    result = dict(row)
+    normalized_username = result.get("active_user") or result.get("username") or username
+    result["username"] = normalized_username
+    return result
 
 def upsert_shift(
     shift_date: date,
@@ -225,34 +266,86 @@ def upsert_shift(
 
     conn = _sqlite_conn()
     cur = conn.cursor()
+    cols = set(_sqlite_cols(conn, "shifts"))
+    now = _now_iso()
 
-    # Insert if missing
-    cur.execute("""
-      INSERT OR IGNORE INTO shifts
-      (shift_date, shift_type, username, vehicle, job_number, site_name, shift_start, shift_hours, shift_notes, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        shift_date.isoformat(), shift_type, username, vehicle,
-        job_number or None, site_name or None, shift_start or None, float(shift_hours),
-        shift_notes or None, _now_iso(), _now_iso()
-    ))
+    existing = None
+    if "username" in cols:
+        existing = conn.execute(
+            "SELECT id FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
+            (shift_date.isoformat(), shift_type, username),
+        ).fetchone()
+    if existing is None and "active_user" in cols:
+        existing = conn.execute(
+            "SELECT id FROM shifts WHERE shift_date=? AND shift_type=? AND active_user=?",
+            (shift_date.isoformat(), shift_type, username),
+        ).fetchone()
 
-    # Update always
-    cur.execute("""
-      UPDATE shifts
-      SET vehicle=?, job_number=?, site_name=?, shift_start=?, shift_hours=?, shift_notes=?, updated_at=?
-      WHERE shift_date=? AND shift_type=? AND username=?
-    """, (
-        vehicle, job_number or None, site_name or None, shift_start or None, float(shift_hours),
-        shift_notes or None, _now_iso(),
-        shift_date.isoformat(), shift_type, username
-    ))
+    # Always avoid NULLs for legacy NOT NULL columns.
+    job_number_val = job_number or ""
+    site_name_val = site_name or None
+    shift_start_val = shift_start or ""
+    shift_hours_val = float(shift_hours)
+    shift_notes_val = shift_notes or None
+    active_user_val = username
+    synced_val = 0
+
+    if existing:
+        sid = int(existing["id"])
+        set_cols = []
+        set_vals = []
+        def setcol(name: str, val):
+            if name in cols:
+                set_cols.append(f"{name}=?")
+                set_vals.append(val)
+
+        setcol("username", username)
+        setcol("vehicle", vehicle)
+        setcol("job_number", job_number_val)
+        setcol("site_name", site_name_val)
+        setcol("shift_start", shift_start_val)
+        setcol("shift_hours", shift_hours_val)
+        setcol("shift_notes", shift_notes_val)
+        setcol("active_user", active_user_val)
+        setcol("synced", synced_val)
+        setcol("updated_at", now)
+
+        if set_cols:
+            set_vals.append(sid)
+            _retry_locked(lambda: cur.execute(
+                f"UPDATE shifts SET {', '.join(set_cols)} WHERE id=?",
+                tuple(set_vals),
+            ))
+    else:
+        insert_cols = []
+        insert_vals = []
+        def add(name: str, val):
+            if name in cols:
+                insert_cols.append(name)
+                insert_vals.append(val)
+
+        add("shift_date", shift_date.isoformat())
+        add("shift_type", shift_type)
+        add("username", username)
+        add("vehicle", vehicle)
+        add("job_number", job_number_val)
+        add("site_name", site_name_val)
+        add("shift_start", shift_start_val)
+        add("shift_hours", shift_hours_val)
+        add("shift_notes", shift_notes_val)
+        add("active_user", active_user_val)
+        add("synced", synced_val)
+        add("created_at", now)
+        add("updated_at", now)
+
+        placeholders = ",".join(["?"] * len(insert_cols))
+        _retry_locked(lambda: cur.execute(
+            f"INSERT INTO shifts({', '.join(insert_cols)}) VALUES({placeholders})",
+            tuple(insert_vals),
+        ))
+        sid = int(cur.lastrowid)
 
     conn.commit()
-    sid = conn.execute(
-        "SELECT id FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
-        (shift_date.isoformat(), shift_type, username),
-    ).fetchone()["id"]
     conn.close()
     return int(sid)
 
@@ -274,12 +367,35 @@ def list_activities(shift_id: int) -> List[Dict[str, Any]]:
         return [r.as_dict() for r in rows]
 
     conn = _sqlite_conn()
-    rows = conn.execute(
-        "SELECT * FROM activities WHERE shift_id=? ORDER BY start_ts ASC, id ASC",
-        (int(shift_id),),
-    ).fetchall()
+    schema = _sqlite_activity_schema(conn)
+    rows: List[sqlite3.Row]
+    if schema == "new":
+        rows = conn.execute(
+            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_ts ASC, id ASC",
+            (int(shift_id),),
+        ).fetchall()
+        result = [dict(r) for r in rows]
+    else:
+        rows = conn.execute(
+            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_time ASC, id ASC",
+            (int(shift_id),),
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            result.append({
+                "id": d.get("id"),
+                "shift_id": d.get("shift_id"),
+                "start_ts": d.get("start_ts") or d.get("start_time"),
+                "end_ts": d.get("end_ts") or d.get("end_time"),
+                "code": d.get("code"),
+                "title": d.get("title") or d.get("description"),
+                "notes": d.get("notes") or d.get("comments") or "",
+                "tool_ref": d.get("tool_ref") or d.get("tools_csv") or "",
+            })
+
     conn.close()
-    return [dict(r) for r in rows]
+    return result
 
 def add_activity(shift_id: int, start_ts: str, end_ts: Optional[str], code: str, title: str, notes: str = "", tool_ref: str = "") -> None:
     init_storage()
@@ -297,10 +413,25 @@ def add_activity(shift_id: int, start_ts: str, end_ts: Optional[str], code: str,
 
     conn = _sqlite_conn()
     cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO activities(shift_id, start_ts, end_ts, code, title, notes, tool_ref, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?)
-    """, (int(shift_id), start_ts, end_ts, code, title, notes or None, tool_ref or None, _now_iso(), _now_iso()))
+    schema = _sqlite_activity_schema(conn)
+    now = _now_iso()
+
+    if schema == "new":
+        _retry_locked(lambda: cur.execute("""
+          INSERT INTO activities(shift_id, start_ts, end_ts, code, title, notes, tool_ref, created_at, updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?)
+        """, (int(shift_id), start_ts, end_ts, code, title, notes or None, tool_ref or None, now, now)))
+    else:
+        activity_user = _sqlite_shift_user(conn, shift_id)
+        end_value = end_ts or start_ts  # legacy schema requires a non-NULL end time
+        _retry_locked(lambda: cur.execute("""
+          INSERT INTO activities(shift_id, start_time, end_time, code, description, tools_csv, comments, qaqc, user_name, created_at, updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            int(shift_id), start_ts, end_value, code, title, tool_ref or None, notes or None, None,
+            activity_user or "", now, now,
+        )))
+
     conn.commit()
     conn.close()
 
@@ -313,6 +444,6 @@ def delete_activity(activity_id: int) -> None:
         return
 
     conn = _sqlite_conn()
-    conn.execute("DELETE FROM activities WHERE id=?", (int(activity_id),))
+    _retry_locked(lambda: conn.execute("DELETE FROM activities WHERE id=?", (int(activity_id),)))
     conn.commit()
     conn.close()
