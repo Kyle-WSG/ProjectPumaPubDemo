@@ -317,7 +317,8 @@ def style(theme: str):
                         var(--wsg-bg);
             color: var(--wsg-text);
           }}
-          .block-container {{padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px;}}
+          /* Extra top padding so content clears the Streamlit deploy bar */
+          .block-container {{padding-top: 3.8rem; padding-bottom: 3rem; max-width: 1200px;}}
           .card {{background: var(--wsg-card); border:1px solid var(--wsg-border); border-radius: 18px; padding: 16px; box-shadow: var(--wsg-shadow);}}
           .pill {{border-radius: 999px; padding: 6px 12px; background: rgba(0,0,0,0.04); font-size: 0.85rem; display: inline-block; margin-right: 6px; margin-bottom: 6px; color: var(--wsg-muted); border: 1px solid var(--wsg-border);}}
           .muted {{opacity:0.82; color: var(--wsg-muted);}}
@@ -354,31 +355,29 @@ def login(users: List[str]):
 
 def topbar():
     d = datetime.fromisoformat(st.session_state.shift_date).date()
-    c1, c2, c3, c4 = st.columns([1.4, 2.6, 1.1, 1.0], vertical_alignment="center")
-    with c1:
-        st.markdown(f"<div class='card'><div class='muted'>User</div><div class='title-md'>{st.session_state.username}</div></div>", unsafe_allow_html=True)
-        if st.button("Log out", use_container_width=True):
-            for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-    with c2:
-        nav = st.columns([1, 2, 1], vertical_alignment="center")
-        with nav[0]:
-            if st.button("◀", use_container_width=True):
-                st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
-        with nav[1]:
-            st.markdown(f"<div class='card' style='text-align:center;'><div class='muted'>Shift date</div><div class='title-md'>{d.strftime('%a %d %b %Y')}</div></div>", unsafe_allow_html=True)
-        with nav[2]:
-            if st.button("▶", use_container_width=True):
-                st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
-    with c3:
+    c_user, c_prev, c_date, c_next, c_today, c_theme, c_logout = st.columns([1.5, 0.7, 2.6, 0.7, 1.0, 1.0, 1.1], vertical_alignment="center")
+    with c_user:
+        st.markdown(f"<div class='title-md' style='text-align:center; padding:6px 0;'>{st.session_state.username}</div>", unsafe_allow_html=True)
+    with c_prev:
+        if st.button("◀", use_container_width=True):
+            st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+    with c_date:
+        st.markdown(f"<div class='title-md' style='text-align:center; padding:6px 0;'>{d.strftime('%a %d %b %Y')}</div>", unsafe_allow_html=True)
+    with c_next:
+        if st.button("▶", use_container_width=True):
+            st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+    with c_today:
         if st.button("Today", use_container_width=True):
             st.session_state.shift_date = iso(date_cls.today()); st.session_state.view = "dd"; st.rerun()
-        st.caption("One shift per user per day.")
-    with c4:
+    with c_theme:
         label = "☀️ Light" if st.session_state.get("theme") == "dark" else "🌙 Dark"
         if st.button(label, key="theme_toggle", use_container_width=True):
             toggle_theme()
+            st.rerun()
+    with c_logout:
+        if st.button("Log out", use_container_width=True):
+            for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
+                st.session_state.pop(k, None)
             st.rerun()
 
 
