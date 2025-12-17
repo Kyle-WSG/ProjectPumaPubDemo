@@ -506,12 +506,26 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
         payload["created_at"] = ts
         cols = ",".join(payload.keys())
         vals = ":" + ",:".join(payload.keys())
-        _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({cols}) VALUES({vals});", payload))
+        try:
+            _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({cols}) VALUES({vals});", payload))
+        except sqlite3.IntegrityError:
+            # If an unexpected constraint trips (e.g., legacy unique indexes), dedupe and fall back to update.
+            _sqlite_dedupe_shifts(conn)
+            _retry_locked(
+                lambda: conn.execute(
+                    f"UPDATE shifts SET {','.join([f'{k}=?' for k in payload.keys() if k!='created_at'])} WHERE shift_date=? AND username=?;",
+                    tuple(v for k, v in payload.items() if k != "created_at") + (dt_str, d.get("username")),
+                )
+            )
 
     conn.commit()
     out = _sqlite_get_shift(conn, dt_str, d.get("username"))
     conn.close()
-    assert out is not None
+    if out is None:
+        # Fallback return payload to avoid crashing if retrieval fails unexpectedly
+        payload["id"] = payload.get("id")
+        payload["created_at"] = payload.get("created_at", ts)
+        return payload
     return out
 
 

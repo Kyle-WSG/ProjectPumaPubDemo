@@ -32,9 +32,9 @@ THEMES = {
         "muted": "#A9B6C7",
         "text": "#E8EDF3",
         "accent": "#C8102E",
-        "accent_alt": "#f7931e",
-        "border": "rgba(255,255,255,0.08)",
-        "shadow": "0 12px 32px rgba(0,0,0,0.35)",
+        "accent_alt": "#F7931E",
+        "border": "rgba(255,255,255,0.12)",
+        "shadow": "0 18px 38px rgba(0,0,0,0.45)",
     },
     "light": {
         "bg": "#F4F6FA",
@@ -43,11 +43,12 @@ THEMES = {
         "muted": "#5B6572",
         "text": "#0A1220",
         "accent": "#C8102E",
-        "accent_alt": "#f7931e",
+        "accent_alt": "#F7931E",
         "border": "rgba(0,0,0,0.08)",
         "shadow": "0 10px 24px rgba(0,0,0,0.08)",
     },
 }
+VERSION = "Alpha_2025_4"
 
 
 def jload(path: Path, default: Any) -> Any:
@@ -383,7 +384,7 @@ def style(theme: str):
         <style>
           :root {{
             --wsg-red: {palette["accent"]};
-            --wsg-red-alt: {palette["accent_alt"]};
+            --wsg-red-alt: #d84f4f;
             --wsg-bg: {palette["bg"]};
             --wsg-card: {palette["card"]};
             --wsg-panel: {palette["panel"]};
@@ -400,16 +401,57 @@ def style(theme: str):
           }}
           /* Extra top padding so content clears the Streamlit deploy bar */
           .block-container {{padding-top: 3.8rem; padding-bottom: 3rem; max-width: 1200px;}}
-          .card {{background: var(--wsg-card); border:1px solid var(--wsg-border); border-radius: 18px; padding: 16px; box-shadow: var(--wsg-shadow);}}
+          .card {{background: var(--wsg-card); border:1px solid var(--wsg-border); border-radius: 18px; padding: 16px; box-shadow: var(--wsg-shadow); backdrop-filter: blur(6px);}}
           .pill {{border-radius: 999px; padding: 6px 12px; background: rgba(0,0,0,0.04); font-size: 0.85rem; display: inline-block; margin-right: 6px; margin-bottom: 6px; color: var(--wsg-muted); border: 1px solid var(--wsg-border);}}
           .muted {{opacity:0.82; color: var(--wsg-muted);}}
           .title-lg {{font-size: 1.45rem; font-weight: 700;}}
-          .title-md {{font-size: 1.1rem; font-weight: 700;}}
-          button[kind="primary"] {{background: linear-gradient(135deg, var(--wsg-red) 0%, var(--wsg-red-alt) 100%); border:none; color: white;}}
-          button[kind="secondary"] {{border: 1px solid var(--wsg-border);}}
+          .title-md {{font-size: 1.1rem; font-weight: 700; line-height: 1.1; margin:0;}}
+          /* Scoped button styles inside the main app container to avoid touching Streamlit chrome */
+          .block-container .stButton>button,
+          .block-container button[kind] {{
+            background: linear-gradient(135deg, var(--wsg-red), var(--wsg-red-alt));
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 10px 16px;
+            box-shadow: 0 10px 24px rgba(200,16,46,0.22);
+            transition: all 0.18s ease;
+            font-weight: 700;
+          }}
+          .block-container .stButton>button:hover,
+          .block-container button[kind]:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 14px 30px rgba(200,16,46,0.3);
+            border-color: rgba(255,255,255,0.18);
+          }}
+          .block-container .stButton>button:active,
+          .block-container button[kind]:active {{
+            transform: translateY(0);
+            box-shadow: 0 8px 18px rgba(200,16,46,0.2);
+          }}
+          .block-container button[kind="secondary"] {{
+            background: linear-gradient(135deg, #1f2735, #2a3244);
+            color: #e8ecf2;
+            border: 1px solid rgba(255,255,255,0.10);
+            box-shadow: none;
+          }}
+          .block-container button[kind="secondary"]:hover {{
+            background: linear-gradient(135deg, #242d3d, #313a4f);
+          }}
+          .block-container .stDownloadButton>button {{
+            background: linear-gradient(135deg, #1f8c6c, #26a985);
+            box-shadow: 0 10px 24px rgba(38,169,133,0.25);
+            border: none;
+          }}
+          .block-container .stDownloadButton>button:hover {{
+            box-shadow: 0 14px 30px rgba(38,169,133,0.32);
+          }}
           .tight-row {{display:flex; gap:10px; flex-wrap:wrap;}}
           .chip {{padding: 6px 10px; border-radius: 10px; border: 1px solid var(--wsg-border); font-size: 0.9rem; color: var(--wsg-muted);}}
           .icon-btn button {{background: transparent !important; border: 1px solid var(--wsg-border); color: var(--wsg-muted);}}
+          .stDataFrame, .stDataEditor {{border-radius: 14px; border:1px solid var(--wsg-border); box-shadow: var(--wsg-shadow);}}
+          .stSelectbox>div>div {{border-radius: 12px !important; border:1px solid var(--wsg-border) !important;}}
+          input, textarea {{border-radius: 10px !important; border:1px solid var(--wsg-border) !important; box-shadow:none !important;}}
         </style>
         """,
         unsafe_allow_html=True,
@@ -436,30 +478,26 @@ def login(users: List[str]):
 
 def topbar():
     d = datetime.fromisoformat(st.session_state.shift_date).date()
-    c_user, c_prev, c_date, c_next, c_today, c_theme, c_logout = st.columns([1.5, 0.7, 2.6, 0.7, 1.0, 1.0, 1.1], vertical_alignment="center")
-    with c_user:
-        st.markdown(f"<div class='title-md' style='text-align:center; padding:6px 0;'>{st.session_state.username}</div>", unsafe_allow_html=True)
-    with c_prev:
-        if st.button("◀", use_container_width=True):
-            st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
-    with c_date:
-        st.markdown(f"<div class='title-md' style='text-align:center; padding:6px 0;'>{d.strftime('%a %d %b %Y')}</div>", unsafe_allow_html=True)
-    with c_next:
-        if st.button("▶", use_container_width=True):
-            st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
-    with c_today:
-        if st.button("Today", use_container_width=True):
-            st.session_state.shift_date = iso(date_cls.today()); st.session_state.view = "dd"; st.rerun()
-    with c_theme:
-        label = "☀️ Light" if st.session_state.get("theme") == "dark" else "🌙 Dark"
-        if st.button(label, key="theme_toggle", use_container_width=True):
-            toggle_theme()
-            st.rerun()
-    with c_logout:
-        if st.button("Log out", use_container_width=True):
-            for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
-                st.session_state.pop(k, None)
-            st.rerun()
+    with st.container(border=True):
+        c_user, c_prev, c_date, c_next, c_today, c_logout = st.columns([1.6, 0.7, 3.0, 0.7, 1.0, 1.1], vertical_alignment="center")
+        with c_user:
+            st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{st.session_state.username}</div>", unsafe_allow_html=True)
+        with c_prev:
+            if st.button("◀", use_container_width=True):
+                st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+        with c_date:
+            st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{d.strftime('%a %d %b %Y')}</div>", unsafe_allow_html=True)
+        with c_next:
+            if st.button("▶", use_container_width=True):
+                st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+        with c_today:
+            if st.button("Today", use_container_width=True):
+                st.session_state.shift_date = iso(date_cls.today()); st.session_state.view = "dd"; st.rerun()
+        with c_logout:
+            if st.button("Log out", use_container_width=True):
+                for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
 
 
 def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], existing: Dict[str, Any] | None = None, missing: List[str] | None = None, form_key: str = "shift_form"):
@@ -727,7 +765,6 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
     option_ids = [o.isoformat() for o in options]
 
     code_default = act.get("code") or code_list[0]
-    st.session_state.edit_code_select = code_default
     code_choice = st.selectbox("Code", code_list, index=(code_list.index(code_default) if code_default in code_list else 0), key="edit_code_select")
     st.caption(f"**{code_choice}** — {label_by.get(code_choice, code_choice)}")
 
@@ -1112,6 +1149,8 @@ def main():
                 storage.delete_activity(st.session_state.shift_date, st.session_state.username, int(a["id"]))
                 st.rerun()
 
+    st.divider()
+    st.markdown(f"<div style='text-align:center; color:var(--wsg-muted);'>Version {VERSION}</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

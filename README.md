@@ -1,15 +1,16 @@
 # Project Puma — Daily Diary (Wireline Activity Log)
 
-**Forked for a December demo**: this branch carries the current UX with theme toggle, editing flows, and shift/activity validation.
+**Forked for a December demo**: this branch carries the current UX with enhanced buttons/borders, LOG well-report mock, and shift/activity validation.
 
 Project Puma is a Streamlit app for capturing one shift per user per day (single vehicle + single site) with multiple activities. It stores data in SQLite by default and can switch to Snowflake automatically if a Snowpark session is active.
 
 ## What it does
 - Login from `config/users.json` (simple dropdown, no auth).
 - Per day, per user: create or edit a shift (client, site, job number, vehicle snapshot, start/end times, optional notes).
-- Add activities with start/end, code/label, tool (for LOG/CAL), notes; conflict checks prevent overlaps and defaults pick the first free slot in the shift window.
+- Add activities with start/end, code/label, tools (multi-select for LOG/CAL), hole ID, notes; conflict checks prevent overlaps and defaults pick the first free slot in the shift window.
 - Timeline shows the full shift window plus activities, with coverage bar. Edit mode highlights the active activity.
 - Activities can be edited or deleted inline; cards show time range, duration, code colors, tool/notes hints.
+- LOG activities: open a mock “Well report” editor (in development) with planning fields, DGPS, hangup table, calibration table, comments, and Excel export for demos.
 
 ## Data model
 SQLite DB at `data/project_puma.db` (Snowflake when a Snowpark session is available).
