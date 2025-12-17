@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import time
 from datetime import datetime, date
@@ -6,8 +7,10 @@ from typing import Any, Dict, List, Optional
 
 DB_PATH = os.path.join("data", "project_puma.db")
 
-def _now_iso() -> str:
+
+def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
 
 def _try_get_sf_session():
     try:
@@ -16,33 +19,27 @@ def _try_get_sf_session():
     except Exception:
         return None
 
+
 def backend() -> str:
     return "snowflake" if _try_get_sf_session() is not None else "sqlite"
 
-def _retry_locked(fn, retries: int = 20):
-    for i in range(retries):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower():
-                time.sleep(0.15 * (i + 1))
-                continue
-            raise
-    raise sqlite3.OperationalError("database is locked (retry exhausted)")
+
+def _load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
 
 # ---------------- SQLITE ----------------
-def _sqlite_conn():
+def _sqlite_conn() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    # isolation_level=None = autocommit (reduces weird lock behavior around PRAGMAs)
     conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-
-    # Always set busy timeout first
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA foreign_keys=ON;")
-
-    # WAL is great, but it can be locked briefly if another process has the DB open.
-    # So we retry instead of crashing the app.
+    # Enable WAL with retries in case another process briefly locks
     for i in range(30):
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
@@ -53,22 +50,25 @@ def _sqlite_conn():
                 time.sleep(0.15 * (i + 1))
                 continue
             raise
-
     return conn
+
 
 def _sqlite_cols(conn: sqlite3.Connection, table: str) -> List[str]:
     rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
-    return [r["name"] for r in rows]
+    return [r[1] for r in rows]
 
-def _sqlite_shift_user(conn: sqlite3.Connection, shift_id: int) -> str:
-    cols = set(_sqlite_cols(conn, "shifts"))
-    user_col = "username" if "username" in cols else ("active_user" if "active_user" in cols else None)
-    if user_col is None:
-        return ""
-    row = conn.execute(f"SELECT {user_col} FROM shifts WHERE id=?", (int(shift_id),)).fetchone()
-    if not row:
-        return ""
-    return row[0] if row[0] else ""
+
+def _retry_locked(fn, retries: int = 30):
+    for i in range(retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower():
+                time.sleep(0.1 * (i + 1))
+                continue
+            raise
+    raise sqlite3.OperationalError("database is locked (retry exhausted)")
+
 
 def _sqlite_activity_schema(conn: sqlite3.Connection) -> str:
     cols = set(_sqlite_cols(conn, "activities"))
@@ -78,372 +78,652 @@ def _sqlite_activity_schema(conn: sqlite3.Connection) -> str:
         return "legacy"
     raise sqlite3.OperationalError("activities table schema not recognized")
 
+
+def _sqlite_dedupe_shifts(conn: sqlite3.Connection) -> None:
+    """Keep one shift per (shift_date, username); move activities to the keep_id."""
+    try:
+        dupes = conn.execute(
+            "SELECT shift_date, username, MIN(id) keep_id, GROUP_CONCAT(id) ids, COUNT(*) n "
+            "FROM shifts GROUP BY shift_date, username HAVING n > 1;"
+        ).fetchall()
+        for r in dupes:
+            keep_id = int(r[2])
+            ids = [int(x) for x in str(r[3]).split(",") if x.strip().isdigit()]
+            for sid in ids:
+                if sid == keep_id:
+                    continue
+                _retry_locked(lambda: conn.execute("UPDATE activities SET shift_id=? WHERE shift_id=?;", (keep_id, sid)))
+                _retry_locked(lambda: conn.execute("DELETE FROM shifts WHERE id=?;", (sid,)))
+    except Exception:
+        # If the table is old this may fail; don't block app start.
+        pass
+
+
+def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
+    """
+    Ensure activities uses the canonical schema (start_ts/end_ts and no legacy start_time/end_time).
+    If legacy columns are present or required columns are missing, rebuild the table and copy data.
+    """
+    cols = set(_sqlite_cols(conn, "activities"))
+    needs_migration = (
+        "start_ts" not in cols
+        or "end_ts" not in cols
+        or "code" not in cols
+        or "label" not in cols
+        or "start_time" in cols
+        or "end_time" in cols
+    )
+    if not needs_migration:
+        return
+
+    _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities_new;"))
+    _retry_locked(
+        lambda: conn.execute(
+            """
+            CREATE TABLE activities_new(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              shift_id INTEGER NOT NULL,
+              start_ts TEXT NOT NULL,
+              end_ts TEXT NOT NULL,
+              code TEXT NOT NULL,
+              label TEXT NOT NULL,
+              notes TEXT,
+              tool TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+            );
+            """
+        )
+    )
+
+    now_ts = _now()
+    try:
+        rows = conn.execute("SELECT * FROM activities;").fetchall()
+    except Exception:
+        rows = []
+    for r in rows:
+        d = dict(r)
+        start_val = d.get("start_ts") or d.get("start_time") or d.get("start") or d.get("begin_time")
+        end_val = d.get("end_ts") or d.get("end_time") or d.get("end") or d.get("finish_time") or start_val
+        if not start_val:
+            start_val = now_ts
+        if not end_val:
+            end_val = start_val
+        label_val = d.get("label") or d.get("title") or d.get("description") or "Activity"
+        notes_val = d.get("notes") or d.get("comments")
+        tool_val = d.get("tool") or d.get("tool_ref") or d.get("tools_csv")
+        code_val = d.get("code") or "OTH"
+        created_at = d.get("created_at") or now_ts
+        updated_at = d.get("updated_at") or created_at
+        _retry_locked(
+            lambda: conn.execute(
+                """
+                INSERT INTO activities_new(shift_id, start_ts, end_ts, code, label, notes, tool, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?);
+                """,
+                (
+                    d.get("shift_id"),
+                    start_val,
+                    end_val,
+                    code_val,
+                    label_val,
+                    notes_val,
+                    tool_val,
+                    created_at,
+                    updated_at,
+                ),
+            )
+        )
+
+    _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities;"))
+    _retry_locked(lambda: conn.execute("ALTER TABLE activities_new RENAME TO activities;"))
+    _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);"))
+
+
+def _init_sqlite() -> None:
+    c = _sqlite_conn()
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vehicles(
+          barcode TEXT PRIMARY KEY,
+          name TEXT,
+          description TEXT,
+          model TEXT,
+          category TEXT,
+          location TEXT
+        );
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shifts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          shift_date TEXT NOT NULL,
+          username TEXT NOT NULL,
+          client TEXT NOT NULL,
+          site TEXT NOT NULL,
+          site_other TEXT,
+          job_number TEXT NOT NULL,
+          vehicle_barcode TEXT NOT NULL,
+          vehicle_name TEXT NOT NULL,
+          vehicle_description TEXT,
+          vehicle_model TEXT,
+          vehicle_category TEXT,
+          vehicle_location_expected TEXT,
+          vehicle_location_actual TEXT,
+          vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0,
+          shift_start TEXT NOT NULL,
+          shift_hours REAL NOT NULL DEFAULT 12,
+          shift_notes TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activities(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          shift_id INTEGER NOT NULL,
+          start_ts TEXT NOT NULL,
+          end_ts TEXT NOT NULL,
+          code TEXT NOT NULL,
+          label TEXT NOT NULL,
+          notes TEXT,
+          tool TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(username, shift_date);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);")
+
+    # Add columns if the DB was created with an older schema
+    cols = set(_sqlite_cols(c, "shifts"))
+
+    def add_col(name: str, ddl: str) -> None:
+        if name in cols:
+            return
+        _retry_locked(lambda: c.execute(ddl))
+        cols.add(name)
+
+    add_col("client", "ALTER TABLE shifts ADD COLUMN client TEXT NOT NULL DEFAULT 'Other';")
+    add_col("site", "ALTER TABLE shifts ADD COLUMN site TEXT NOT NULL DEFAULT 'Other';")
+    add_col("site_other", "ALTER TABLE shifts ADD COLUMN site_other TEXT;")
+    add_col("job_number", "ALTER TABLE shifts ADD COLUMN job_number TEXT NOT NULL DEFAULT 'UNKNOWN';")
+    add_col("vehicle_barcode", "ALTER TABLE shifts ADD COLUMN vehicle_barcode TEXT NOT NULL DEFAULT 'UNSET';")
+    add_col("vehicle_name", "ALTER TABLE shifts ADD COLUMN vehicle_name TEXT NOT NULL DEFAULT 'UNSET';")
+    add_col("vehicle_description", "ALTER TABLE shifts ADD COLUMN vehicle_description TEXT;")
+    add_col("vehicle_model", "ALTER TABLE shifts ADD COLUMN vehicle_model TEXT;")
+    add_col("vehicle_category", "ALTER TABLE shifts ADD COLUMN vehicle_category TEXT;")
+    add_col("vehicle_location_expected", "ALTER TABLE shifts ADD COLUMN vehicle_location_expected TEXT;")
+    add_col("vehicle_location_actual", "ALTER TABLE shifts ADD COLUMN vehicle_location_actual TEXT;")
+    add_col("vehicle_location_mismatch", "ALTER TABLE shifts ADD COLUMN vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0;")
+    add_col("shift_hours", "ALTER TABLE shifts ADD COLUMN shift_hours REAL NOT NULL DEFAULT 12;")
+    add_col("shift_notes", "ALTER TABLE shifts ADD COLUMN shift_notes TEXT;")
+
+    _sqlite_dedupe_shifts(c)
+    _sqlite_migrate_activities_to_new(c)
+    c.commit()
+    c.close()
+
+
 def init_storage() -> None:
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        # Put tables in the app schema.
-        s.sql("""
-        CREATE TABLE IF NOT EXISTS PUMA_SHIFTS(
-          ID NUMBER GENERATED BY DEFAULT AS IDENTITY,
-          SHIFT_DATE DATE NOT NULL,
-          SHIFT_TYPE STRING NOT NULL,
-          USERNAME STRING NOT NULL,
-          VEHICLE STRING NOT NULL,
-          JOB_NUMBER STRING,
-          SITE_NAME STRING,
-          SHIFT_START STRING,
-          SHIFT_HOURS FLOAT,
-          SHIFT_NOTES STRING,
-          CREATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-          UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
-        );
-        """).collect()
+        s.sql(
+            """
+            CREATE TABLE IF NOT EXISTS PUMA_VEHICLES(
+              BARCODE STRING, NAME STRING, DESCRIPTION STRING, MODEL STRING,
+              CATEGORY STRING, LOCATION STRING, UPDATED_AT TIMESTAMP_NTZ
+            );
+            """
+        ).collect()
 
-        s.sql("""
-        CREATE TABLE IF NOT EXISTS PUMA_ACTIVITIES(
-          ID NUMBER GENERATED BY DEFAULT AS IDENTITY,
-          SHIFT_ID NUMBER NOT NULL,
-          START_TS TIMESTAMP_NTZ NOT NULL,
-          END_TS TIMESTAMP_NTZ,
-          CODE STRING NOT NULL,
-          TITLE STRING NOT NULL,
-          NOTES STRING,
-          TOOL_REF STRING,
-          CREATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-          UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
-        );
-        """).collect()
+        s.sql(
+            """
+            CREATE TABLE IF NOT EXISTS PUMA_SHIFTS(
+              SHIFT_DATE DATE, USERNAME STRING,
+              CLIENT STRING, SITE STRING, SITE_OTHER STRING, JOB_NUMBER STRING,
+              VEHICLE_BARCODE STRING, VEHICLE_NAME STRING, VEHICLE_DESCRIPTION STRING, VEHICLE_MODEL STRING, VEHICLE_CATEGORY STRING,
+              VEHICLE_LOCATION_EXPECTED STRING, VEHICLE_LOCATION_ACTUAL STRING, VEHICLE_LOCATION_MISMATCH BOOLEAN,
+              SHIFT_START STRING, SHIFT_HOURS FLOAT, SHIFT_NOTES STRING,
+              CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
+            );
+            """
+        ).collect()
+
+        s.sql(
+            """
+            CREATE TABLE IF NOT EXISTS PUMA_ACTIVITIES(
+              ID NUMBER AUTOINCREMENT,
+              SHIFT_DATE DATE, USERNAME STRING,
+              START_TS TIMESTAMP_NTZ, END_TS TIMESTAMP_NTZ,
+              CODE STRING, LABEL STRING, NOTES STRING, TOOL STRING,
+              CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
+            );
+            """
+        ).collect()
+        return
+
+    _init_sqlite()
+
+
+def upsert_reference_data(vehicles: List[Dict[str, Any]]) -> None:
+    if not vehicles:
+        return
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql("DELETE FROM PUMA_VEHICLES;").collect()
+        ts = datetime.utcnow()
+        rows = []
+        for v in vehicles:
+            rows.append({
+                "BARCODE": str(v.get("barcode", "")),
+                "NAME": str(v.get("name", "")),
+                "DESCRIPTION": str(v.get("description", "")),
+                "MODEL": str(v.get("model", "")),
+                "CATEGORY": str(v.get("category", "")),
+                "LOCATION": str(v.get("location", "")),
+                "UPDATED_AT": ts,
+            })
+        if rows:
+            s.create_dataframe(rows).write.save_as_table("PUMA_VEHICLES", mode="append")
         return
 
     conn = _sqlite_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS shifts(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      shift_date TEXT NOT NULL,
-      shift_type TEXT NOT NULL,
-      username TEXT NOT NULL,
-      vehicle TEXT NOT NULL,
-      job_number TEXT,
-      site_name TEXT,
-      shift_start TEXT,
-      shift_hours REAL,
-      shift_notes TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE(shift_date, shift_type, username)
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS activities(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      shift_id INTEGER NOT NULL,
-      start_ts TEXT NOT NULL,
-      end_ts TEXT,
-      code TEXT NOT NULL,
-      title TEXT NOT NULL,
-      notes TEXT,
-      tool_ref TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY(shift_id) REFERENCES shifts(id)
-    );
-    """)
-
-    conn.commit()
-
-    # Migrate older DBs (add any missing columns)
-    cols = _sqlite_cols(conn, "shifts")
-    def add_col(name: str, ddl: str):
-        if name not in cols:
-            _retry_locked(lambda: cur.execute(ddl))
-
-    add_col("job_number", "ALTER TABLE shifts ADD COLUMN job_number TEXT;")
-    add_col("site_name", "ALTER TABLE shifts ADD COLUMN site_name TEXT;")
-    add_col("shift_start", "ALTER TABLE shifts ADD COLUMN shift_start TEXT;")
-    add_col("shift_hours", "ALTER TABLE shifts ADD COLUMN shift_hours REAL;")
-    add_col("shift_notes", "ALTER TABLE shifts ADD COLUMN shift_notes TEXT;")
-
+    for v in vehicles:
+        _retry_locked(
+            lambda: conn.execute(
+                """
+                INSERT INTO vehicles(barcode, name, description, model, category, location)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(barcode) DO UPDATE SET
+                  name=excluded.name,
+                  description=excluded.description,
+                  model=excluded.model,
+                  category=excluded.category,
+                  location=excluded.location;
+                """,
+                (
+                    v.get("barcode"),
+                    v.get("name"),
+                    v.get("description"),
+                    v.get("model"),
+                    v.get("category"),
+                    v.get("location"),
+                ),
+            )
+        )
     conn.commit()
     conn.close()
 
-def get_shift(shift_date: date, shift_type: str, username: str) -> Optional[Dict[str, Any]]:
-    init_storage()
+
+def _sqlite_get_shift(conn: sqlite3.Connection, shift_date: str, username: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM shifts WHERE shift_date=? AND username=? ORDER BY updated_at DESC, id DESC LIMIT 1;",
+        (shift_date, username),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM shifts WHERE shift_date=? AND active_user=? ORDER BY updated_at DESC, id DESC LIMIT 1;",
+            (shift_date, username),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_shift(shift_date: date | str, username: str) -> Optional[Dict[str, Any]]:
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        rows = s.sql("""
-          SELECT *
-          FROM PUMA_SHIFTS
-          WHERE SHIFT_DATE = ? AND SHIFT_TYPE = ? AND USERNAME = ?
-          ORDER BY UPDATED_AT DESC, ID DESC
-          LIMIT 1
-        """, params=[shift_date, shift_type, username]).collect()
+        rows = s.sql(
+            "SELECT * FROM PUMA_SHIFTS WHERE SHIFT_DATE=? AND USERNAME=? ORDER BY UPDATED_AT DESC LIMIT 1",
+            params=[dt_str, username],
+        ).collect()
         if not rows:
             return None
-        r = rows[0]
-        return {
-            "id": int(r["ID"]),
-            "shift_date": str(r["SHIFT_DATE"]),
-            "shift_type": r["SHIFT_TYPE"],
-            "username": r["USERNAME"],
-            "vehicle": r["VEHICLE"],
-            "job_number": r.get("JOB_NUMBER"),
-            "site_name": r.get("SITE_NAME"),
-            "shift_start": r.get("SHIFT_START"),
-            "shift_hours": r.get("SHIFT_HOURS"),
-            "shift_notes": r.get("SHIFT_NOTES"),
-        }
+        r = rows[0].as_dict()
+        r = {k.lower(): v for k, v in r.items()}
+        r["shift_date"] = dt_str
+        return r
 
     conn = _sqlite_conn()
-    cols = set(_sqlite_cols(conn, "shifts"))
-
-    row = None
-    if "username" in cols:
-        row = conn.execute(
-            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
-            (shift_date.isoformat(), shift_type, username),
-        ).fetchone()
-
-    if row is None and "active_user" in cols:
-        row = conn.execute(
-            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? AND active_user=?",
-            (shift_date.isoformat(), shift_type, username),
-        ).fetchone()
-
-    if row is None and "username" in cols:
-        row = conn.execute(
-            "SELECT * FROM shifts WHERE shift_date=? AND shift_type=? ORDER BY updated_at DESC, id DESC LIMIT 1",
-            (shift_date.isoformat(), shift_type),
-        ).fetchone()
-
+    row = _sqlite_get_shift(conn, dt_str, username)
     conn.close()
-    if not row:
-        return None
+    return row
 
-    result = dict(row)
-    normalized_username = result.get("active_user") or result.get("username") or username
-    result["username"] = normalized_username
-    return result
 
-def upsert_shift(
-    shift_date: date,
-    shift_type: str,
-    username: str,
-    vehicle: str,
-    job_number: str = "",
-    site_name: str = "",
-    shift_start: str = "",
-    shift_hours: float = 12.0,
-    shift_notes: str = "",
-) -> int:
-    init_storage()
+def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
+    required = ["shift_date", "username", "client", "site", "job_number", "vehicle_barcode", "vehicle_name", "shift_start"]
+    for k in required:
+        if not str(d.get(k, "")).strip():
+            raise ValueError(f"Missing required field: {k}")
+
+    dt_str = d.get("shift_date") if isinstance(d.get("shift_date"), str) else d.get("shift_date").isoformat()
+
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-
-        existing = get_shift(shift_date, shift_type, username)
-        if existing:
-            sid = int(existing["id"])
-            s.sql("""
-              UPDATE PUMA_SHIFTS
-              SET VEHICLE=?, JOB_NUMBER=?, SITE_NAME=?, SHIFT_START=?, SHIFT_HOURS=?, SHIFT_NOTES=?, UPDATED_AT=CURRENT_TIMESTAMP()
-              WHERE ID=?
-            """, params=[vehicle, job_number, site_name, shift_start, float(shift_hours), shift_notes, sid]).collect()
-            return sid
-
-        s.sql("""
-          INSERT INTO PUMA_SHIFTS(SHIFT_DATE, SHIFT_TYPE, USERNAME, VEHICLE, JOB_NUMBER, SITE_NAME, SHIFT_START, SHIFT_HOURS, SHIFT_NOTES)
-          VALUES(?,?,?,?,?,?,?,?,?)
-        """, params=[shift_date, shift_type, username, vehicle, job_number, site_name, shift_start, float(shift_hours), shift_notes]).collect()
-
-        created = get_shift(shift_date, shift_type, username)
-        assert created is not None
-        return int(created["id"])
+        ts = "CURRENT_TIMESTAMP()"
+        mismatch = "TRUE" if bool(d.get("vehicle_location_mismatch")) else "FALSE"
+        s.sql(
+            """
+            MERGE INTO PUMA_SHIFTS t
+            USING (SELECT TO_DATE(?) SHIFT_DATE, ? USERNAME) src
+            ON t.SHIFT_DATE = src.SHIFT_DATE AND t.USERNAME = src.USERNAME
+            WHEN MATCHED THEN UPDATE SET
+              CLIENT=?, SITE=?, SITE_OTHER=?, JOB_NUMBER=?,
+              VEHICLE_BARCODE=?, VEHICLE_NAME=?, VEHICLE_DESCRIPTION=?, VEHICLE_MODEL=?, VEHICLE_CATEGORY=?,
+              VEHICLE_LOCATION_EXPECTED=?, VEHICLE_LOCATION_ACTUAL=?, VEHICLE_LOCATION_MISMATCH=?,
+              SHIFT_START=?, SHIFT_HOURS=?, SHIFT_NOTES=?, UPDATED_AT={ts}
+            WHEN NOT MATCHED THEN INSERT(
+              SHIFT_DATE, USERNAME, CLIENT, SITE, SITE_OTHER, JOB_NUMBER,
+              VEHICLE_BARCODE, VEHICLE_NAME, VEHICLE_DESCRIPTION, VEHICLE_MODEL, VEHICLE_CATEGORY,
+              VEHICLE_LOCATION_EXPECTED, VEHICLE_LOCATION_ACTUAL, VEHICLE_LOCATION_MISMATCH,
+              SHIFT_START, SHIFT_HOURS, SHIFT_NOTES, CREATED_AT, UPDATED_AT
+            ) VALUES(
+              TO_DATE(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {ts}, {ts}
+            );
+            """.format(ts=ts),
+            params=[
+                dt_str,
+                d.get("username"),
+                d.get("client"), d.get("site"), d.get("site_other"), d.get("job_number"),
+                d.get("vehicle_barcode"), d.get("vehicle_name"), d.get("vehicle_description"), d.get("vehicle_model"), d.get("vehicle_category"),
+                d.get("vehicle_location_expected"), d.get("vehicle_location_actual"), bool(d.get("vehicle_location_mismatch")),
+                d.get("shift_start"), float(d.get("shift_hours", 12)), d.get("shift_notes"),
+                dt_str,
+                d.get("username"), d.get("client"), d.get("site"), d.get("site_other"), d.get("job_number"),
+                d.get("vehicle_barcode"), d.get("vehicle_name"), d.get("vehicle_description"), d.get("vehicle_model"), d.get("vehicle_category"),
+                d.get("vehicle_location_expected"), d.get("vehicle_location_actual"), bool(d.get("vehicle_location_mismatch")),
+                d.get("shift_start"), float(d.get("shift_hours", 12)), d.get("shift_notes"),
+            ],
+        ).collect()
+        out = get_shift(dt_str, d.get("username"))
+        assert out is not None
+        return out
 
     conn = _sqlite_conn()
-    cur = conn.cursor()
-    cols = set(_sqlite_cols(conn, "shifts"))
-    now = _now_iso()
+    existing = _sqlite_get_shift(conn, dt_str, d.get("username"))
+    ts = _now()
 
-    existing = None
-    if "username" in cols:
-        existing = conn.execute(
-            "SELECT id FROM shifts WHERE shift_date=? AND shift_type=? AND username=?",
-            (shift_date.isoformat(), shift_type, username),
-        ).fetchone()
-    if existing is None and "active_user" in cols:
-        existing = conn.execute(
-            "SELECT id FROM shifts WHERE shift_date=? AND shift_type=? AND active_user=?",
-            (shift_date.isoformat(), shift_type, username),
-        ).fetchone()
-
-    # Always avoid NULLs for legacy NOT NULL columns.
-    job_number_val = job_number or ""
-    site_name_val = site_name or None
-    shift_start_val = shift_start or ""
-    shift_hours_val = float(shift_hours)
-    shift_notes_val = shift_notes or None
-    active_user_val = username
-    synced_val = 0
+    payload = {
+        "shift_date": dt_str,
+        "username": d.get("username"),
+        "client": d.get("client"),
+        "site": d.get("site"),
+        "site_other": d.get("site_other"),
+        "job_number": d.get("job_number"),
+        "vehicle_barcode": d.get("vehicle_barcode"),
+        "vehicle_name": d.get("vehicle_name"),
+        "vehicle_description": d.get("vehicle_description"),
+        "vehicle_model": d.get("vehicle_model"),
+        "vehicle_category": d.get("vehicle_category"),
+        "vehicle_location_expected": d.get("vehicle_location_expected"),
+        "vehicle_location_actual": d.get("vehicle_location_actual"),
+        "vehicle_location_mismatch": int(bool(d.get("vehicle_location_mismatch"))),
+        "shift_start": d.get("shift_start"),
+        "shift_hours": float(d.get("shift_hours", 12)),
+        "shift_notes": d.get("shift_notes"),
+        "updated_at": ts,
+    }
 
     if existing:
-        sid = int(existing["id"])
-        set_cols = []
-        set_vals = []
-        def setcol(name: str, val):
-            if name in cols:
-                set_cols.append(f"{name}=?")
-                set_vals.append(val)
-
-        setcol("username", username)
-        setcol("vehicle", vehicle)
-        setcol("job_number", job_number_val)
-        setcol("site_name", site_name_val)
-        setcol("shift_start", shift_start_val)
-        setcol("shift_hours", shift_hours_val)
-        setcol("shift_notes", shift_notes_val)
-        setcol("active_user", active_user_val)
-        setcol("synced", synced_val)
-        setcol("updated_at", now)
-
-        if set_cols:
-            set_vals.append(sid)
-            _retry_locked(lambda: cur.execute(
-                f"UPDATE shifts SET {', '.join(set_cols)} WHERE id=?",
-                tuple(set_vals),
-            ))
+        sets = ",".join([f"{k}=?" for k in payload.keys()])
+        _retry_locked(
+            lambda: conn.execute(
+                f"UPDATE shifts SET {sets} WHERE shift_date=? AND username=?;",
+                tuple(payload.values()) + (dt_str, d.get("username")),
+            )
+        )
     else:
-        insert_cols = []
-        insert_vals = []
-        def add(name: str, val):
-            if name in cols:
-                insert_cols.append(name)
-                insert_vals.append(val)
-
-        add("shift_date", shift_date.isoformat())
-        add("shift_type", shift_type)
-        add("username", username)
-        add("vehicle", vehicle)
-        add("job_number", job_number_val)
-        add("site_name", site_name_val)
-        add("shift_start", shift_start_val)
-        add("shift_hours", shift_hours_val)
-        add("shift_notes", shift_notes_val)
-        add("active_user", active_user_val)
-        add("synced", synced_val)
-        add("created_at", now)
-        add("updated_at", now)
-
-        placeholders = ",".join(["?"] * len(insert_cols))
-        _retry_locked(lambda: cur.execute(
-            f"INSERT INTO shifts({', '.join(insert_cols)}) VALUES({placeholders})",
-            tuple(insert_vals),
-        ))
-        sid = int(cur.lastrowid)
+        payload["created_at"] = ts
+        cols = ",".join(payload.keys())
+        vals = ":" + ",:".join(payload.keys())
+        _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({cols}) VALUES({vals});", payload))
 
     conn.commit()
+    out = _sqlite_get_shift(conn, dt_str, d.get("username"))
     conn.close()
-    return int(sid)
+    assert out is not None
+    return out
 
-def list_activities(shift_id: int) -> List[Dict[str, Any]]:
-    init_storage()
+
+def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any]]:
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        rows = s.sql("""
-          SELECT
-            ID, SHIFT_ID,
-            TO_VARCHAR(START_TS, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS START_TS,
-            IFF(END_TS IS NULL, NULL, TO_VARCHAR(END_TS, 'YYYY-MM-DD\"T\"HH24:MI:SS')) AS END_TS,
-            CODE, TITLE, NOTES, TOOL_REF
-          FROM PUMA_ACTIVITIES
-          WHERE SHIFT_ID = ?
-          ORDER BY START_TS ASC, ID ASC
-        """, params=[int(shift_id)]).collect()
-        return [r.as_dict() for r in rows]
+        rows = s.sql(
+            "SELECT * FROM PUMA_ACTIVITIES WHERE SHIFT_DATE=TO_DATE(?) AND USERNAME=? ORDER BY START_TS ASC, ID ASC",
+            params=[dt_str, username],
+        ).collect()
+        return [dict(r.as_dict()) for r in rows]
 
     conn = _sqlite_conn()
+    sh = _sqlite_get_shift(conn, dt_str, username)
+    if not sh:
+        conn.close()
+        return []
+
     schema = _sqlite_activity_schema(conn)
-    rows: List[sqlite3.Row]
     if schema == "new":
         rows = conn.execute(
-            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_ts ASC, id ASC",
-            (int(shift_id),),
+            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_ts ASC, id ASC;",
+            (sh["id"],),
         ).fetchall()
-        result = [dict(r) for r in rows]
-    else:
-        rows = conn.execute(
-            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_time ASC, id ASC",
-            (int(shift_id),),
-        ).fetchall()
-        result = []
+        out = []
         for r in rows:
             d = dict(r)
-            result.append({
+            # Hybrid schemas can keep legacy columns; populate missing timeline fields from them.
+            if not d.get("start_ts"):
+                d["start_ts"] = d.get("start_time") or d.get("start")
+            if not d.get("end_ts"):
+                d["end_ts"] = d.get("end_time") or d.get("end")
+            if not d.get("label"):
+                d["label"] = d.get("description") or d.get("title")
+            if not d.get("notes"):
+                d["notes"] = d.get("comments")
+            if not d.get("tool"):
+                d["tool"] = d.get("tools_csv") or d.get("tool_ref")
+            out.append(d)
+    else:
+        rows = conn.execute(
+            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_time ASC, id ASC;",
+            (sh["id"],),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            out.append({
                 "id": d.get("id"),
                 "shift_id": d.get("shift_id"),
                 "start_ts": d.get("start_ts") or d.get("start_time"),
                 "end_ts": d.get("end_ts") or d.get("end_time"),
                 "code": d.get("code"),
-                "title": d.get("title") or d.get("description"),
+                "label": d.get("label") or d.get("title") or d.get("description"),
                 "notes": d.get("notes") or d.get("comments") or "",
-                "tool_ref": d.get("tool_ref") or d.get("tools_csv") or "",
+                "tool": d.get("tool") or d.get("tool_ref") or d.get("tools_csv") or "",
             })
-
     conn.close()
-    return result
+    return out
 
-def add_activity(shift_id: int, start_ts: str, end_ts: Optional[str], code: str, title: str, notes: str = "", tool_ref: str = "") -> None:
-    init_storage()
+
+def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> None:
+    # Normalize required fields early and guarantee non-NULL start/end for legacy schemas.
+    start_val = a.get("start_ts") or a.get("start_time")
+    end_val = a.get("end_ts") or a.get("end_time") or start_val
+    code_val = a.get("code")
+    label_val = a.get("label")
+
+    for name, val in (("start_ts", start_val), ("end_ts", end_val), ("code", code_val), ("label", label_val)):
+        if val is None or (isinstance(val, str) and not str(val).strip()):
+            raise ValueError(f"Missing activity field: {name}")
+
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        s.sql("""
-          INSERT INTO PUMA_ACTIVITIES(SHIFT_ID, START_TS, END_TS, CODE, TITLE, NOTES, TOOL_REF)
-          SELECT
-            ?, TO_TIMESTAMP_NTZ(?),
-            IFF(? IS NULL OR ? = '', NULL, TO_TIMESTAMP_NTZ(?)),
-            ?, ?, NULLIF(?, ''), NULLIF(?, '')
-        """, params=[int(shift_id), start_ts, end_ts, end_ts or "", end_ts or "", code, title, notes or "", tool_ref or ""]).collect()
+        s.sql(
+            """
+            INSERT INTO PUMA_ACTIVITIES(
+              SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, CREATED_AT, UPDATED_AT
+            ) VALUES(TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+            """,
+            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool")],
+        ).collect()
         return
 
     conn = _sqlite_conn()
-    cur = conn.cursor()
-    schema = _sqlite_activity_schema(conn)
-    now = _now_iso()
+    sh = _sqlite_get_shift(conn, dt_str, username)
+    if not sh:
+        conn.close()
+        raise ValueError("Shift does not exist yet.")
 
-    if schema == "new":
-        _retry_locked(lambda: cur.execute("""
-          INSERT INTO activities(shift_id, start_ts, end_ts, code, title, notes, tool_ref, created_at, updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?)
-        """, (int(shift_id), start_ts, end_ts, code, title, notes or None, tool_ref or None, now, now)))
-    else:
-        activity_user = _sqlite_shift_user(conn, shift_id)
-        end_value = end_ts or start_ts  # legacy schema requires a non-NULL end time
-        _retry_locked(lambda: cur.execute("""
-          INSERT INTO activities(shift_id, start_time, end_time, code, description, tools_csv, comments, qaqc, user_name, created_at, updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            int(shift_id), start_ts, end_value, code, title, tool_ref or None, notes or None, None,
-            activity_user or "", now, now,
-        )))
+    ts = _now()
+    cols = set(_sqlite_cols(conn, "activities"))
+    # Populate both new and legacy columns when present to avoid NOT NULL conflicts on hybrid schemas.
+    ordered_fields = [
+        "shift_id",
+        "start_ts",
+        "end_ts",
+        "start_time",
+        "end_time",
+        "code",
+        "label",
+        "description",
+        "title",
+        "notes",
+        "comments",
+        "tool",
+        "tools_csv",
+        "qaqc",
+        "user_name",
+        "created_at",
+        "updated_at",
+    ]
+    payload = {
+        "shift_id": sh["id"],
+        "start_ts": start_val,
+        "end_ts": end_val,
+        "start_time": start_val,
+        "end_time": end_val,
+        "code": code_val,
+        "label": label_val,
+        "description": label_val,
+        "title": label_val,
+        "notes": a.get("notes"),
+        "comments": a.get("notes"),
+        "tool": a.get("tool"),
+        "tools_csv": a.get("tool"),
+        "qaqc": None,
+        "user_name": username,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    insert_cols = [c for c in ordered_fields if c in cols]
+    if not insert_cols:
+        conn.close()
+        raise sqlite3.OperationalError("activities table has no recognized columns")
 
+    placeholders = ",".join(["?"] * len(insert_cols))
+    sql = f"INSERT INTO activities({','.join(insert_cols)}) VALUES({placeholders});"
+    _retry_locked(lambda: conn.execute(sql, tuple(payload[c] for c in insert_cols)))
     conn.commit()
     conn.close()
 
-def delete_activity(activity_id: int) -> None:
-    init_storage()
+
+def delete_activity(shift_date: str | date, username: str, activity_id: int) -> None:
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        s.sql("DELETE FROM PUMA_ACTIVITIES WHERE ID=?", params=[int(activity_id)]).collect()
+        s.sql(
+            "DELETE FROM PUMA_ACTIVITIES WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;",
+            params=[int(activity_id), dt_str, username],
+        ).collect()
         return
 
     conn = _sqlite_conn()
-    _retry_locked(lambda: conn.execute("DELETE FROM activities WHERE id=?", (int(activity_id),)))
+    sh = _sqlite_get_shift(conn, dt_str, username)
+    if not sh:
+        conn.close()
+        return
+    _retry_locked(lambda: conn.execute("DELETE FROM activities WHERE id=? AND shift_id=?;", (int(activity_id), sh["id"])))
+    conn.commit()
+    conn.close()
+
+
+def update_activity(shift_date: str | date, username: str, activity_id: int, a: Dict[str, Any]) -> None:
+    start_val = a.get("start_ts") or a.get("start_time")
+    end_val = a.get("end_ts") or a.get("end_time") or start_val
+    code_val = a.get("code")
+    label_val = a.get("label")
+
+    for name, val in (("start_ts", start_val), ("end_ts", end_val), ("code", code_val), ("label", label_val)):
+        if val is None or (isinstance(val, str) and not str(val).strip()):
+            raise ValueError(f"Missing activity field: {name}")
+
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            """
+            UPDATE PUMA_ACTIVITIES
+              SET START_TS=TO_TIMESTAMP_NTZ(?), END_TS=TO_TIMESTAMP_NTZ(?),
+                  CODE=?, LABEL=?, NOTES=?, TOOL=?, UPDATED_AT=CURRENT_TIMESTAMP()
+            WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;
+            """,
+            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), int(activity_id), dt_str, username],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    sh = _sqlite_get_shift(conn, dt_str, username)
+    if not sh:
+        conn.close()
+        raise ValueError("Shift does not exist yet.")
+
+    schema = _sqlite_activity_schema(conn)
+    ts = _now()
+    if schema == "new":
+        _retry_locked(
+            lambda: conn.execute(
+                """
+                UPDATE activities
+                   SET start_ts=?, end_ts=?, code=?, label=?, notes=?, tool=?, updated_at=?
+                 WHERE id=? AND shift_id=?;
+                """,
+                (start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), ts, int(activity_id), sh["id"]),
+            )
+        )
+    else:
+        _retry_locked(
+            lambda: conn.execute(
+                """
+                UPDATE activities
+                   SET start_time=?, end_time=?, code=?, description=?, tools_csv=?, comments=?, updated_at=?
+                 WHERE id=? AND shift_id=?;
+                """,
+                (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), ts, int(activity_id), sh["id"]),
+            )
+        )
     conn.commit()
     conn.close()

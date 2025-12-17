@@ -1,0 +1,201 @@
+import os, json, sqlite3, time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+DB_PATH = os.path.join("data", "project_puma.db")
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+def _try_sf_session():
+    try:
+        from snowflake.snowpark.context import get_active_session  # type: ignore
+        return get_active_session()
+    except Exception:
+        return None
+
+_SF = None
+
+def backend() -> str:
+    global _SF
+    if _SF is None:
+        _SF = _try_sf_session()
+    return "snowflake" if _SF is not None else "sqlite"
+
+def _sf():
+    global _SF
+    if _SF is None:
+        _SF = _try_sf_session()
+    if _SF is None:
+        raise RuntimeError("Snowflake session not available")
+    return _SF
+
+def _q(v: Optional[str]) -> str:
+    if v is None:
+        return "NULL"
+    return "'" + str(v).replace("'", "''") + "'"
+
+def _normalize_sf_row(d: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in d.items():
+        lk = str(k).lower()
+        if hasattr(v, "isoformat"):
+            try:
+                out[lk] = v.isoformat(timespec="seconds")
+            except TypeError:
+                out[lk] = v.isoformat()
+        else:
+            out[lk] = v
+    return out
+
+def _sqlite_conn() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    for i in range(30):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower():
+                time.sleep(0.15 * (i + 1))
+                continue
+            raise
+    return conn
+
+def _load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def init_storage() -> None:
+    if backend() == "sqlite":
+        _init_sqlite()
+    else:
+        _init_snowflake()
+    upsert_reference_data()
+
+def _init_sqlite() -> None:
+    c = _sqlite_conn()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS vehicles(
+      barcode TEXT PRIMARY KEY,
+      name TEXT, description TEXT, model TEXT, category TEXT, location TEXT
+    );""")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS shifts(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_date TEXT NOT NULL,
+      username TEXT NOT NULL,
+      client TEXT NOT NULL,
+      site TEXT NOT NULL,
+      site_other TEXT,
+      job_number TEXT NOT NULL,
+      vehicle_barcode TEXT NOT NULL,
+      vehicle_name TEXT NOT NULL,
+      vehicle_category TEXT,
+      vehicle_location_expected TEXT,
+      vehicle_location_actual TEXT,
+      vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0,
+      shift_start TEXT NOT NULL,
+      shift_hours REAL NOT NULL DEFAULT 12,
+      shift_notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );""")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS activities(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_id INTEGER NOT NULL,
+      start_ts TEXT NOT NULL,
+      end_ts TEXT NOT NULL,
+      code TEXT NOT NULL,
+      label TEXT NOT NULL,
+      notes TEXT,
+      tool TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+    );""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(username, shift_date);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);")
+
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(shifts);").fetchall()}
+    def add_col(name: str, ddl: str) -> None:
+        if name in cols:
+            return
+        for i in range(30):
+            try:
+                c.execute(ddl)
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower():
+                    time.sleep(0.15 * (i + 1))
+                    continue
+                raise
+    add_col("shift_notes", "ALTER TABLE shifts ADD COLUMN shift_notes TEXT;")
+
+def _init_snowflake() -> None:
+    s = _sf()
+    s.sql("""
+    CREATE TABLE IF NOT EXISTS PUMA_VEHICLES(
+      BARCODE STRING, NAME STRING, DESCRIPTION STRING, MODEL STRING,
+      CATEGORY STRING, LOCATION STRING, UPDATED_AT TIMESTAMP_NTZ
+    );""").collect()
+    s.sql("""
+    CREATE TABLE IF NOT EXISTS PUMA_SHIFTS(
+      SHIFT_DATE DATE, USERNAME STRING,
+      CLIENT STRING, SITE STRING, SITE_OTHER STRING, JOB_NUMBER STRING,
+      VEHICLE_BARCODE STRING, VEHICLE_NAME STRING, VEHICLE_CATEGORY STRING,
+      VEHICLE_LOCATION_EXPECTED STRING, VEHICLE_LOCATION_ACTUAL STRING, VEHICLE_LOCATION_MISMATCH BOOLEAN,
+      SHIFT_START STRING, SHIFT_HOURS FLOAT, SHIFT_NOTES STRING,
+      CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
+    );""").collect()
+    s.sql("""
+    CREATE TABLE IF NOT EXISTS PUMA_ACTIVITIES(
+      ID NUMBER AUTOINCREMENT,
+      SHIFT_DATE DATE, USERNAME STRING,
+      START_TS TIMESTAMP_NTZ, END_TS TIMESTAMP_NTZ,
+      CODE STRING, LABEL STRING, NOTES STRING, TOOL STRING,
+      CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
+    );""").collect()
+
+def upsert_reference_data() -> None:
+    vehicles = _load_json(os.path.join("config", "vehicles_catalog.json"), {}).get("vehicles", [])
+    if vehicles:
+        upsert_vehicles(vehicles)
+
+def upsert_vehicles(vehicles: List[Dict[str, Any]]) -> None:
+    if backend() == "sqlite":
+        c = _sqlite_conn()
+        for v in vehicles:
+            c.execute("""
+              INSERT INTO vehicles(barcode,name,description,model,category,location)
+              VALUES(?,?,?,?,?,?)
+              ON CONFLICT(barcode) DO UPDATE SET
+                name=excluded.name,
+                description=excluded.description,
+                model=excluded.model,
+                category=excluded.category,
+                location=excluded.location;
+            """, (v.get("barcode"), v.get("name"), v.get("description"), v.get("model"), v.get("category"), v.get("location")))
+    else:
+        s = _sf()
+        s.sql("DELETE FROM PUMA_VEHICLES;").collect()
+        ts = datetime.utcnow()
+        rows = [{
+            "BARCODE": str(v.get("barcode","")),
+            "NAME": str(v.get("name","")),
+            "DESCRIPTION": str(v.get("description","")),
+            "MODEL": str(v.get("model","")),
+            "CATEGORY": str(v.get("category","")),
+            "LOCATION": str(v.get("location","")),
+            "UPDATED_AT": ts,
+        } for v in vehicles]
+        if rows:
+            s.create_dataframe(rows).write.save_as_table("PUMA_VEHICLES", mode="append")

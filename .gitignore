@@ -1,12 +1,8 @@
-# Python
+.venv/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-
-# Virtual env
-.venv/
-
-# Local DB
-data/project_puma.db
+*.db
 data/*.db
+.streamlit/secrets.toml
+.DS_Store

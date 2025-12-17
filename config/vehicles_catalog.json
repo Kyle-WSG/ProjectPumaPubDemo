@@ -1,0 +1,444 @@
+{
+  "vehicles": [
+    {
+      "barcode": "803",
+      "name": "0803 - Support",
+      "description": "Support Vehicle",
+      "model": "Canter",
+      "category": "Support Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "805",
+      "name": "0805 Support Vehicle QLD",
+      "description": "Support Vehicle",
+      "model": "Hilux Tub Tray",
+      "category": "Support Vehicle",
+      "location": "QLD Storage"
+    },
+    {
+      "barcode": "806",
+      "name": "0806 - Logging Unit",
+      "description": "Logging Vehicle",
+      "model": "Hilux 4x4 Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "1003",
+      "name": "1003",
+      "description": "Logging Vehicle",
+      "model": "Canter",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "1005",
+      "name": "1005 - Logging Unit",
+      "description": "Logging Vehicle",
+      "model": "Hilux 4x4 Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "1206",
+      "name": "1206",
+      "description": "Support Vehicle Rego: 1HMF484",
+      "model": "Hilux 4x4 Dual Cab",
+      "category": "Support Vehicle",
+      "location": "Hancock"
+    },
+    {
+      "barcode": "1401",
+      "name": "1401 Support Canada",
+      "description": "Support Vehicle",
+      "model": "F350 CREWCAB",
+      "category": "Support Vehicle",
+      "location": "Wireline Canada"
+    },
+    {
+      "barcode": "1701",
+      "name": "1701 - Logging Unit - Spare HPPL/EXPO",
+      "description": "Logging Vehicle",
+      "model": "Hilux 4x4 Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "Hancock"
+    },
+    {
+      "barcode": "1702",
+      "name": "1702 - Logging Unit",
+      "description": "Logging Vehicle",
+      "model": "Hilux 4\u00d74 Dual Cab Manual",
+      "category": "Logging Vehicle",
+      "location": "Hancock"
+    },
+    {
+      "barcode": "1703",
+      "name": "1703 - Support",
+      "description": "Support Vehicle Rego: BSN107S",
+      "model": "Hilux Extra Cab",
+      "category": "Support Vehicle",
+      "location": "Hancock"
+    },
+    {
+      "barcode": "1801",
+      "name": "1801 - Logging Unit",
+      "description": "Logging Vehicle",
+      "model": "Hilux 4\u00d74 Dual Cab Automatic Rego: 1GKO253",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Eliwana"
+    },
+    {
+      "barcode": "1802",
+      "name": "1802 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1GKO252",
+      "model": "Hilux, Dual 4x4 Cab-Manual",
+      "category": "Logging Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "1803",
+      "name": "1803 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1GKO259",
+      "model": "Hilux, Dual 4x4 Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "1804",
+      "name": "1804 - Logging Unit - Spare Roy Hill",
+      "description": "Logging Vehicle Rego: 1GKO251",
+      "model": "Hilux, 4x4 Dual Cab Manual",
+      "category": "Logging Vehicle",
+      "location": "Hancock"
+    },
+    {
+      "barcode": "1901",
+      "name": "1901 - MD",
+      "description": "Support Vehicle Rego: 1EKF830",
+      "model": "Land Cruiser",
+      "category": "mattmayne@wirelineservices.com.au",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "1902",
+      "name": "1902",
+      "description": "Logging Vehicle",
+      "model": "F350",
+      "category": "Logging Vehicle",
+      "location": "Canadian Operations"
+    },
+    {
+      "barcode": "2001",
+      "name": "2001 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1GXM373",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Cloudbreak"
+    },
+    {
+      "barcode": "2002",
+      "name": "2002 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1GXM408",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Cloudbreak"
+    },
+    {
+      "barcode": "2003",
+      "name": "2003 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1GXM409",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Cloudbreak"
+    },
+    {
+      "barcode": "2004",
+      "name": "2004 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1IBY109",
+      "model": "NPS75",
+      "category": "Logging Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2005",
+      "name": "2005 - Flatbed Truck",
+      "description": "Support Vehicle Rego: 1HDQ650",
+      "model": "FTS800",
+      "category": "Support Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "2101",
+      "name": "2101 (Field Maintenance UTE)",
+      "description": "Support Vehicle Rego: 1HDO903",
+      "model": "SR HILUX",
+      "category": "Support Vehicle",
+      "location": "Pilbara West Australia"
+    },
+    {
+      "barcode": "2102",
+      "name": "2102 - Support",
+      "description": "Support Vehicle Rego: 1HCA989",
+      "model": "Hilux 4x4 Dual Cab",
+      "category": "Support Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2103",
+      "name": "2103 - Logging Unit - Spare CB/IB FMGL",
+      "description": "Logging Vehicle Rego: 1HFF180",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Cloudbreak"
+    },
+    {
+      "barcode": "2104",
+      "name": "2104 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HFF179",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "FMG EXPO / DIAMOND"
+    },
+    {
+      "barcode": "2105",
+      "name": "2105 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HGZ159",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Solomon"
+    },
+    {
+      "barcode": "2106",
+      "name": "2106 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HIP600",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Solomon"
+    },
+    {
+      "barcode": "2107",
+      "name": "2107 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HJM294",
+      "model": "817",
+      "category": "Logging Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2108",
+      "name": "2108 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HLH520",
+      "model": "817",
+      "category": "Logging Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2109",
+      "name": "2109 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HIA026",
+      "model": "LANDCRUISER",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "2110",
+      "name": "2110 - Logging Unit",
+      "description": "Logging Vehicle Rego 1HIA025",
+      "model": "TOYOTA",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "2111",
+      "name": "2111 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HJK185",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2112",
+      "name": "2112 - Logging Unit - Spare Eli /Sol FMGL",
+      "description": "Logging Vehicle Rego: 1HJK184",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Solomon"
+    },
+    {
+      "barcode": "2201",
+      "name": "2201 - Superintendent",
+      "description": "Support Vehicle Rego: 1HLY439",
+      "model": "L/Cruiser Single Cab",
+      "category": "Support Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2202",
+      "name": "2202 - Support Drill Intell",
+      "description": "Support Vehicle Rego: 1HWG846",
+      "model": "Land Cruiser Dual Cab",
+      "category": "Support Vehicle",
+      "location": "Drill Intelligence"
+    },
+    {
+      "barcode": "2203",
+      "name": "2203 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HPQ495",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2204",
+      "name": "2204 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HPQ498",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Roy Hill Minesite"
+    },
+    {
+      "barcode": "2205",
+      "name": "2205 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HPQ492",
+      "model": "Hilux, Dual Cab",
+      "category": "Logging Vehicle",
+      "location": "Roy Hill Minesite"
+    },
+    {
+      "barcode": "2206",
+      "name": "2206 - Flatbed Truck",
+      "description": "Support Vehicle Rego: 1HRE352",
+      "model": "FM Table Top",
+      "category": "Support Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "2207",
+      "name": "2207 - Support Marketing",
+      "description": "Support Vehicle Rego: 1GUA958",
+      "model": "BT50",
+      "category": "Support Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2301",
+      "name": "2301 - Logging Unit Canada",
+      "description": "Support Vehicle",
+      "model": "F250 Extended Cab",
+      "category": "Support Vehicle",
+      "location": "Wireline Canada"
+    },
+    {
+      "barcode": "2302",
+      "name": "2302 (HELMS Support UTE)",
+      "description": "HELMS Support Vehicle Rego: 1HKK393",
+      "model": "Land Cruiser Cab",
+      "category": "Support Vehicle",
+      "location": "Roy Hill Minesite"
+    },
+    {
+      "barcode": "2303",
+      "name": "2303 - Logging Unit",
+      "description": "Logging Vehicle",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "RTC Winu"
+    },
+    {
+      "barcode": "2401",
+      "name": "2401 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HGH 002",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2402",
+      "name": "2402 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HMV049",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "RTIO Brockman"
+    },
+    {
+      "barcode": "2403",
+      "name": "2403 HELMS",
+      "description": "Logging Vehicle (Helms) Rego: 1IDO170",
+      "model": "Isuzu FTS 139-260",
+      "category": "Logging Vehicle (Helms)",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2404",
+      "name": "2404 - Support",
+      "description": "Support Vehicle Rego: 1HOB403",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Support Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2405",
+      "name": "2405 - Helms to be built",
+      "description": "Logging Vehicle: New Unregistered",
+      "model": "500 Series",
+      "category": "Logging Vehicle",
+      "location": "Bannister Storage"
+    },
+    {
+      "barcode": "2406",
+      "name": "2406 - Support",
+      "description": "Support Vehicle Rego: 1HNT884",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Support Vehicle",
+      "location": "FMG Mine Solomon"
+    },
+    {
+      "barcode": "2407",
+      "name": "2407 - Support",
+      "description": "Support Vehicle Rego: 1HQB 458",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Support Vehicle",
+      "location": "FMG Mine Cloudbreak"
+    },
+    {
+      "barcode": "2408",
+      "name": "2408 - Support",
+      "description": "Support Vehicle Rego: 1HOV 583",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Support Vehicle",
+      "location": "Roy Hill Minesite"
+    },
+    {
+      "barcode": "2501",
+      "name": "2501 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HRC 226",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Ironbridge"
+    },
+    {
+      "barcode": "2502",
+      "name": "2502 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HTS 631",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "Perth Assets"
+    },
+    {
+      "barcode": "2503",
+      "name": "2503 - Logging Unit",
+      "description": "Logging Vehicle Rego: 1HTW 340",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Logging Vehicle",
+      "location": "FMG Mine Solomon"
+    },
+    {
+      "barcode": "2504",
+      "name": "2504 - Support",
+      "description": "Support Vehicle Rego: 1HSV714",
+      "model": "Hilux, Dual Cab Automatic",
+      "category": "Support Vehicle",
+      "location": "Perth Assets"
+    }
+  ]
+}

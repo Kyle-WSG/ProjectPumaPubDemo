@@ -1,0 +1,11 @@
+import streamlit as st
+import storage
+
+def main():
+    st.set_page_config(page_title="Project Puma", layout="wide")
+    storage.init_storage()
+    st.title("Project Puma")
+    st.success("Boot OK. (This is just a placeholder app.py in this block.)")
+
+if __name__ == "__main__":
+    main()
