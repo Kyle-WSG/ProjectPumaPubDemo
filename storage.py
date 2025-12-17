@@ -384,11 +384,14 @@ def upsert_reference_data(vehicles: List[Dict[str, Any]]) -> None:
 
 
 def _sqlite_get_shift(conn: sqlite3.Connection, shift_date: str, username: str) -> Optional[Dict[str, Any]]:
-    row = conn.execute(
-        "SELECT * FROM shifts WHERE shift_date=? AND username=? ORDER BY updated_at DESC, id DESC LIMIT 1;",
-        (shift_date, username),
-    ).fetchone()
-    if row is None:
+    cols = set(_sqlite_cols(conn, "shifts"))
+    row = None
+    if "username" in cols:
+        row = conn.execute(
+            "SELECT * FROM shifts WHERE shift_date=? AND username=? ORDER BY updated_at DESC, id DESC LIMIT 1;",
+            (shift_date, username),
+        ).fetchone()
+    if row is None and "active_user" in cols:
         row = conn.execute(
             "SELECT * FROM shifts WHERE shift_date=? AND active_user=? ORDER BY updated_at DESC, id DESC LIMIT 1;",
             (shift_date, username),
@@ -470,6 +473,7 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
         return out
 
     conn = _sqlite_conn()
+    col_set = set(_sqlite_cols(conn, "shifts"))
     existing = _sqlite_get_shift(conn, dt_str, d.get("username"))
     ts = _now()
 
@@ -494,29 +498,69 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": ts,
     }
 
+    if "active_user" in col_set:
+        payload["active_user"] = d.get("username")
+    if "shift_type" in col_set:
+        payload["shift_type"] = d.get("shift_type") or "Day"
+    if "vehicle" in col_set:
+        payload["vehicle"] = d.get("vehicle") or d.get("vehicle_name") or d.get("vehicle_barcode") or "UNSET"
+    if "site_name" in col_set:
+        site_name = d.get("site_other") if d.get("site") in {"Other", "Other (manual)"} else d.get("site")
+        payload["site_name"] = site_name
+    if "synced" in col_set and "synced" not in payload:
+        payload["synced"] = int(bool(d.get("synced", 0)))
+
+    payload = {k: v for k, v in payload.items() if k in col_set}
+
     if existing:
+        where_clause = None
+        where_params: tuple[Any, ...]
+        if existing.get("id") is not None:
+            where_clause = "id=?"
+            where_params = (int(existing.get("id")),)
+        elif "username" in col_set:
+            where_clause = "shift_date=? AND username=?"
+            where_params = (dt_str, d.get("username"))
+        elif "active_user" in col_set:
+            where_clause = "shift_date=? AND active_user=?"
+            where_params = (dt_str, d.get("username"))
+        else:
+            where_clause = "shift_date=?"
+            where_params = (dt_str,)
+
         sets = ",".join([f"{k}=?" for k in payload.keys()])
-        _retry_locked(
-            lambda: conn.execute(
-                f"UPDATE shifts SET {sets} WHERE shift_date=? AND username=?;",
-                tuple(payload.values()) + (dt_str, d.get("username")),
-            )
-        )
+        _retry_locked(lambda: conn.execute(f"UPDATE shifts SET {sets} WHERE {where_clause};", tuple(payload.values()) + where_params))
     else:
-        payload["created_at"] = ts
-        cols = ",".join(payload.keys())
-        vals = ":" + ",:".join(payload.keys())
+        if "created_at" in col_set:
+            payload["created_at"] = ts
+        insert_cols = ",".join(payload.keys())
+        insert_vals = ":" + ",:".join(payload.keys())
         try:
-            _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({cols}) VALUES({vals});", payload))
+            _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({insert_cols}) VALUES({insert_vals});", payload))
         except sqlite3.IntegrityError:
-            # If an unexpected constraint trips (e.g., legacy unique indexes), dedupe and fall back to update.
+            # If an unexpected constraint trips (e.g., legacy unique indexes), dedupe and try again.
             _sqlite_dedupe_shifts(conn)
-            _retry_locked(
-                lambda: conn.execute(
-                    f"UPDATE shifts SET {','.join([f'{k}=?' for k in payload.keys() if k!='created_at'])} WHERE shift_date=? AND username=?;",
-                    tuple(v for k, v in payload.items() if k != "created_at") + (dt_str, d.get("username")),
+            col_list = list(payload.keys())
+            placeholders = ",".join(["?"] * len(col_list))
+            try:
+                _retry_locked(lambda: conn.execute(f"INSERT OR REPLACE INTO shifts({insert_cols}) VALUES({placeholders});", tuple(payload[c] for c in col_list)))
+            except sqlite3.IntegrityError:
+                # Final fallback: attempt update in place
+                if "username" in col_set:
+                    where_clause = "shift_date=? AND username=?"
+                    where_params = (dt_str, d.get("username"))
+                elif "active_user" in col_set:
+                    where_clause = "shift_date=? AND active_user=?"
+                    where_params = (dt_str, d.get("username"))
+                else:
+                    where_clause = "shift_date=?"
+                    where_params = (dt_str,)
+                _retry_locked(
+                    lambda: conn.execute(
+                        f"UPDATE shifts SET {','.join([f'{k}=?' for k in payload.keys() if k!='created_at'])} WHERE {where_clause};",
+                        tuple(v for k, v in payload.items() if k != "created_at") + where_params,
+                    )
                 )
-            )
 
     conn.commit()
     out = _sqlite_get_shift(conn, dt_str, d.get("username"))

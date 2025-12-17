@@ -48,7 +48,7 @@ THEMES = {
         "shadow": "0 10px 24px rgba(0,0,0,0.08)",
     },
 }
-VERSION = "Alpha_2025_4"
+VERSION = "Alpha_2025_5"
 
 
 def jload(path: Path, default: Any) -> Any:
