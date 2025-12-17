@@ -1,4 +1,8 @@
 import json
+import random
+from io import BytesIO
+
+import pandas as pd
 from datetime import date as date_cls, datetime, timedelta, time as time_cls
 from pathlib import Path
 from typing import Any, Dict, List
@@ -181,6 +185,83 @@ def iso(d: date_cls) -> str:
 
 def dt_on(d: date_cls, t: time_cls) -> datetime:
     return datetime(d.year, d.month, d.day, t.hour, t.minute)
+
+
+def hangup_table_defaults(tools: List[str]) -> List[Dict[str, Any]]:
+    if not tools:
+        return [{"Tool": "Tool 1", "Hangup depth (m)": ""}]
+    out = []
+    for t in tools:
+        out.append({"Tool": t, "Hangup depth (m)": ""})
+    return out
+
+
+def calibration_table_defaults() -> List[Dict[str, Any]]:
+    return [{"Item": "", "Details": ""}]
+
+
+def well_report_excel_bytes(report: Dict[str, Any], hangups: List[Dict[str, Any]], calibrations: List[Dict[str, Any]], dgps: Dict[str, Any], comments: str) -> bytes:
+    buf = BytesIO()
+    summary_rows = [{
+        "Planned Northing/Easting": report.get("planned_northing_easting"),
+        "Field": report.get("field"),
+        "Site": report.get("site"),
+        "Country": report.get("country"),
+        "Mag Dec": report.get("mag_dec"),
+        "Planned Dip": report.get("planned_dip"),
+        "Planned Azimuth": report.get("planned_azimuth"),
+        "Datum": report.get("datum"),
+        "Grid Zone": report.get("grid_zone"),
+        "Elevation": report.get("elevation"),
+        "Drill Depth": report.get("drill_depth"),
+        "Log Depth": report.get("log_depth"),
+        "Hole ID": report.get("hole_id"),
+        "IN DEVELOPMENT": "IN DEVELOPMENT",
+    }]
+    dgps_rows = [{
+        "Easting": dgps.get("easting"),
+        "Northing": dgps.get("northing"),
+        "Zone": dgps.get("zone"),
+        "Datum": dgps.get("datum"),
+        "Elevation": dgps.get("elevation"),
+        "Accuracy": dgps.get("accuracy"),
+    }]
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Well Report", index=False)
+        pd.DataFrame(hangups).to_excel(writer, sheet_name="Hangup Depths", index=False)
+        pd.DataFrame(calibrations).to_excel(writer, sheet_name="Calibration", index=False)
+        pd.DataFrame(dgps_rows).to_excel(writer, sheet_name="DGPS", index=False)
+        pd.DataFrame([{"Comments": comments or ""}]).to_excel(writer, sheet_name="Comments", index=False)
+    return buf.getvalue()
+
+
+def demo_well_report_defaults(act: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate placeholder well report values for demo purposes."""
+    depth_from = round(random.uniform(50, 250), 1)
+    depth_to = round(depth_from + random.uniform(10, 40), 1)
+    return {
+        "planned_northing_easting": f"{random.randint(700000, 799999)}E {random.randint(7400000, 7499999)}N",
+        "field": "Demo Field",
+        "site": "STE-01",
+        "country": "AU",
+        "mag_dec": random.choice([0.0, 1.2, 1.5]),
+        "planned_dip": -60,
+        "planned_azimuth": 45,
+        "datum": "MGA94",
+        "grid_zone": "50K",
+        "elevation": round(random.uniform(300, 550), 1),
+        "drill_depth": depth_to + 20,
+        "log_depth": depth_to,
+        "hole_id": act.get("hole_id") or f"H-{random.randint(100, 999)}",
+        "comments": "Auto-generated for demo purposes. Adjust before finalising.",
+        "inj_development": "IN DEVELOPMENT",
+        "dgps_easting": random.randint(700000, 799999),
+        "dgps_northing": random.randint(7400000, 7499999),
+        "dgps_zone": "50K",
+        "dgps_datum": "MGA94",
+        "dgps_elevation": round(random.uniform(300, 550), 1),
+        "dgps_accuracy": "±0.05m",
+    }
 
 
 def shift_progress(shift: Dict[str, Any], acts: List[Dict[str, Any]]) -> float:
@@ -581,15 +662,17 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
         with c2:
             end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(end_default_id) if end_default_id in option_ids else min(len(option_ids)-1, option_ids.index(start_default_id)+1 if start_default_id in option_ids else 1), key="act_end_iso")
 
-        tool = None
-        tool_placeholder = st.empty()
+        selected_tools: List[str] = []
         if code_choice in {"LOG", "CAL"}:
-            tool = tool_placeholder.selectbox("Tool (LOG/CAL only)", tools, key="tool_select")
+            default_tools = st.session_state.get("tool_select_multi", [])
+            if not isinstance(default_tools, list):
+                default_tools = []
+            if not default_tools and tools:
+                default_tools = [tools[0]]
+            selected_tools = st.multiselect("Tools (LOG/CAL only)", tools, default=default_tools, key="tool_select_multi")
         else:
-            # Clear stale tool state when not applicable
-            if "tool_select" in st.session_state:
-                del st.session_state["tool_select"]
-
+            st.session_state.pop("tool_select_multi", None)
+        hole_id = st.text_input("Hole ID (optional)", placeholder="Enter hole ID or leave blank")
         notes = st.text_area("Notes (optional)", height=80)
 
         ok = st.form_submit_button("Add activity", type="primary", use_container_width=True)
@@ -617,7 +700,8 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
             "end_ts": a1.isoformat(timespec="seconds"),
             "code": code_choice,
             "label": label_by.get(code_choice, code_choice),
-            "tool": (tool or "").strip() or None,
+            "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else None),
+            "hole_id": hole_id.strip() if hole_id.strip() else None,
             "notes": notes.strip() if notes.strip() else None,
         })
         st.session_state.view = "dd"
@@ -652,6 +736,12 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         st.session_state.edit_activity_id = None
         st.rerun()
 
+    if code_choice == "LOG":
+        if st.button("Well report", key=f"wr_open_{act.get('id')}", use_container_width=True):
+            st.session_state.well_report_activity_id = int(act.get("id"))
+            st.session_state.view = "well_report"
+            st.rerun()
+
     with st.form("edit_act_form", clear_on_submit=False):
         c1, c2 = st.columns([1.0, 1.0])
         start_iso = act.get("start_ts") or (act.get("start_time") if act else None)
@@ -665,19 +755,19 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         with c2:
             end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(end_iso), key="edit_act_end_iso")
 
-        tool = None
-        tool_placeholder = st.empty()
+        selected_tools: List[str] = []
         if code_choice in {"LOG", "CAL"}:
-            tool_default = act.get("tool") or st.session_state.get("tool_select_edit")
-            if tool_default in tools:
-                idx = tools.index(tool_default)
-            else:
-                idx = 0
-            tool = tool_placeholder.selectbox("Tool (LOG/CAL only)", tools, key="tool_select_edit", index=idx if idx < len(tools) else 0)
+            existing_tools = []
+            if act.get("tool"):
+                existing_tools = [t.strip() for t in str(act.get("tool")).split(",") if t.strip()]
+            default_tools = st.session_state.get("tool_select_edit_multi", existing_tools)
+            if not isinstance(default_tools, list):
+                default_tools = existing_tools
+            selected_tools = st.multiselect("Tools (LOG/CAL only)", tools, default=default_tools, key="tool_select_edit_multi")
         else:
-            if "tool_select_edit" in st.session_state:
-                del st.session_state["tool_select_edit"]
+            st.session_state.pop("tool_select_edit_multi", None)
 
+        hole_id_val = st.text_input("Hole ID (optional)", value=str(act.get("hole_id") or ""))
         notes = st.text_area("Notes (optional)", height=80, value=str(act.get("notes") or ""))
 
         ok = st.form_submit_button("Save changes", type="primary", use_container_width=True)
@@ -707,12 +797,128 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
             "end_ts": a1.isoformat(timespec="seconds"),
             "code": code_choice,
             "label": label_by.get(code_choice, code_choice),
-            "tool": (tool or "").strip() or None,
+            "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else (act.get("tool") if code_choice not in {"LOG", "CAL"} else None)),
+            "hole_id": hole_id_val.strip() if hole_id_val.strip() else None,
             "notes": notes.strip() if notes.strip() else None,
         })
         st.session_state.view = "dd"
         st.session_state.edit_activity_id = None
         st.success("Activity updated.")
+        st.rerun()
+
+
+def well_report_view(act: Dict[str, Any]):
+    """Render the well report editor for a LOG activity."""
+    if not act or act.get("code") != "LOG":
+        st.warning("Well report is only available for LOG activities.")
+        st.session_state.view = "dd"
+        st.session_state.well_report_activity_id = None
+        st.rerun()
+
+    tools = [t.strip() for t in str(act.get("tool") or "").split(",") if t.strip()]
+    aid = int(act.get("id"))
+    data_key = f"wr_data_{aid}"
+    hang_key = f"wr_hang_{aid}"
+    calib_key = f"wr_calib_{aid}"
+
+    if data_key not in st.session_state:
+        st.session_state[data_key] = demo_well_report_defaults(act)
+    if hang_key not in st.session_state:
+        st.session_state[hang_key] = hangup_table_defaults(tools)
+    if calib_key not in st.session_state:
+        st.session_state[calib_key] = calibration_table_defaults()
+
+    data = st.session_state.get(data_key, {})
+    hangups = st.session_state.get(hang_key, [])
+    calibrations = st.session_state.get(calib_key, [])
+
+    st.markdown(f"## Well report — {act.get('label')} ({act.get('code')})")
+    st.caption("IN DEVELOPMENT")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        pne = st.text_input("Planned Northing/Easting", value=str(data.get("planned_northing_easting", "")), key=f"wr_pne_{aid}")
+        field = st.text_input("Field", value=str(data.get("field", "")), key=f"wr_field_{aid}")
+        site = st.text_input("Site", value=str(data.get("site", "")), key=f"wr_site_{aid}")
+        country = st.text_input("Country", value=str(data.get("country", "")), key=f"wr_country_{aid}")
+        mag_dec = st.number_input("Mag Dec", value=float(data.get("mag_dec") or 0.0), step=0.1, format="%.2f", key=f"wr_magdec_{aid}")
+        plan_dip = st.number_input("Planned Dip", value=float(data.get("planned_dip") or 0.0), step=1.0, format="%.2f", key=f"wr_pd_{aid}")
+    with c2:
+        plan_az = st.number_input("Planned Azimuth", value=float(data.get("planned_azimuth") or 0.0), step=1.0, format="%.2f", key=f"wr_paz_{aid}")
+        datum = st.text_input("Datum", value=str(data.get("datum", "")), key=f"wr_datum_{aid}")
+        grid = st.text_input("Grid Zone", value=str(data.get("grid_zone", "")), key=f"wr_grid_{aid}")
+        elev = st.number_input("Elevation", value=float(data.get("elevation") or 0.0), step=0.1, format="%.2f", key=f"wr_elev_{aid}")
+        drill = st.number_input("Drill Depth", value=float(data.get("drill_depth") or 0.0), step=1.0, format="%.2f", key=f"wr_drill_{aid}")
+        log_depth = st.number_input("Log Depth", value=float(data.get("log_depth") or 0.0), step=1.0, format="%.2f", key=f"wr_log_{aid}")
+    hole_id = st.text_input("Hole ID", value=str(data.get("hole_id", "")), key=f"wr_hole_{aid}")
+
+    st.markdown("**Hangup depths (per tool)**")
+    hangups = st.data_editor(hangups or hangup_table_defaults(tools), key=f"wr_hang_table_{aid}", num_rows="dynamic", use_container_width=True)
+
+    st.markdown("**Calibration details** (leave blank if none)")
+    calibrations = st.data_editor(calibrations or [], key=f"wr_calib_table_{aid}", num_rows="dynamic", use_container_width=True)
+
+    st.markdown("**DGPS**")
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        dgps_e = st.number_input("Easting", value=float(data.get("dgps_easting") or 0.0), step=1.0, key=f"wr_dgps_e_{aid}")
+        dgps_zone = st.text_input("Zone", value=str(data.get("dgps_zone", "")), key=f"wr_dgps_zone_{aid}")
+    with c4:
+        dgps_n = st.number_input("Northing", value=float(data.get("dgps_northing") or 0.0), step=1.0, key=f"wr_dgps_n_{aid}")
+        dgps_datum = st.text_input("Datum (DGPS)", value=str(data.get("dgps_datum", "")), key=f"wr_dgps_datum_{aid}")
+    with c5:
+        dgps_el = st.number_input("Elevation (DGPS)", value=float(data.get("dgps_elevation") or 0.0), step=0.1, format="%.2f", key=f"wr_dgps_el_{aid}")
+        dgps_acc = st.text_input("Accuracy", value=str(data.get("dgps_accuracy", "")), key=f"wr_dgps_acc_{aid}")
+
+    comments = st.text_area("Comments", value=str(data.get("comments", "")), height=100, key=f"wr_comments_{aid}")
+
+    updated_data = {
+        "planned_northing_easting": pne,
+        "field": field,
+        "site": site,
+        "country": country,
+        "mag_dec": mag_dec,
+        "planned_dip": plan_dip,
+        "planned_azimuth": plan_az,
+        "datum": datum,
+        "grid_zone": grid,
+        "elevation": elev,
+        "drill_depth": drill,
+        "log_depth": log_depth,
+        "hole_id": hole_id,
+        "comments": comments,
+        "inj_development": "IN DEVELOPMENT",
+        "dgps_easting": dgps_e,
+        "dgps_northing": dgps_n,
+        "dgps_zone": dgps_zone,
+        "dgps_datum": dgps_datum,
+        "dgps_elevation": dgps_el,
+        "dgps_accuracy": dgps_acc,
+    }
+    dgps_data = {
+        "easting": dgps_e,
+        "northing": dgps_n,
+        "zone": dgps_zone,
+        "datum": dgps_datum,
+        "elevation": dgps_el,
+        "accuracy": dgps_acc,
+    }
+
+    st.session_state[data_key] = updated_data
+    st.session_state[hang_key] = hangups
+    st.session_state[calib_key] = calibrations
+
+    btn1, btn2, btn3 = st.columns([1, 1, 1])
+    save_clicked = btn1.button("Save", type="primary", use_container_width=True)
+    dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
+    btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    exit_clicked = btn3.button("Exit", type="secondary", use_container_width=True)
+
+    if save_clicked:
+        st.success("Well report saved.")
+    if exit_clicked:
+        st.session_state.view = "edit_activity"
+        st.session_state.well_report_activity_id = None
         st.rerun()
 
 
@@ -804,6 +1010,19 @@ def main():
         st.warning(f"Vehicle location mismatch flagged. Expected: {sh.get('vehicle_location_expected')} · Actual: {sh.get('vehicle_location_actual')}")
 
     acts = storage.list_activities(st.session_state.shift_date, st.session_state.username)
+
+    if st.session_state.get("view") == "well_report":
+        target_id = st.session_state.get("well_report_activity_id") or st.session_state.get("edit_activity_id")
+        target = next((a for a in acts if int(a.get("id")) == int(target_id)), None)
+        if target:
+            st.divider()
+            well_report_view(target)
+        else:
+            st.warning("No activity found for well report.")
+            st.session_state.view = "dd"
+            st.session_state.well_report_activity_id = None
+        return
+
     st.markdown("### Shift coverage")
     st.progress(shift_progress(sh, acts), text="Coverage of scheduled shift")
     st.caption("The bar fills as activities cover time inside the shift window.")
@@ -868,7 +1087,9 @@ def main():
         is_editing = st.session_state.get("edit_activity_id") == a.get("id") and st.session_state.get("view") == "edit_activity"
         meta_bits = []
         if a.get("tool"):
-            meta_bits.append(f"Tool: {a.get('tool')}")
+            meta_bits.append(f"Tools: {a.get('tool')}")
+        if a.get("hole_id"):
+            meta_bits.append(f"Hole: {a.get('hole_id')}")
         if a.get("notes"):
             meta_bits.append("Notes")
 
@@ -882,14 +1103,14 @@ def main():
                     st.caption(" · ".join(meta_bits))
                 if a.get("notes"):
                     st.write(a.get("notes"))
-            with c_right:
-                if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", use_container_width=True):
-                    st.session_state.edit_activity_id = int(a.get("id"))
-                    st.session_state.view = "edit_activity"
-                    st.rerun()
-                if st.button("🗑️", key=f"del_{a.get('id')}", help="Delete activity", use_container_width=True):
-                    storage.delete_activity(st.session_state.shift_date, st.session_state.username, int(a["id"]))
-                    st.rerun()
+        with c_right:
+            if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", use_container_width=True):
+                st.session_state.edit_activity_id = int(a.get("id"))
+                st.session_state.view = "edit_activity"
+                st.rerun()
+            if st.button("🗑️", key=f"del_{a.get('id')}", help="Delete activity", use_container_width=True):
+                storage.delete_activity(st.session_state.shift_date, st.session_state.username, int(a["id"]))
+                st.rerun()
 
 
 if __name__ == "__main__":

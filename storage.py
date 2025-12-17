@@ -129,6 +129,7 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
               label TEXT NOT NULL,
               notes TEXT,
               tool TEXT,
+              hole_id TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
@@ -153,14 +154,15 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
         label_val = d.get("label") or d.get("title") or d.get("description") or "Activity"
         notes_val = d.get("notes") or d.get("comments")
         tool_val = d.get("tool") or d.get("tool_ref") or d.get("tools_csv")
+        hole_id_val = d.get("hole_id")
         code_val = d.get("code") or "OTH"
         created_at = d.get("created_at") or now_ts
         updated_at = d.get("updated_at") or created_at
         _retry_locked(
             lambda: conn.execute(
                 """
-                INSERT INTO activities_new(shift_id, start_ts, end_ts, code, label, notes, tool, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?);
+                INSERT INTO activities_new(shift_id, start_ts, end_ts, code, label, notes, tool, hole_id, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?);
                 """,
                 (
                     d.get("shift_id"),
@@ -170,6 +172,7 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
                     label_val,
                     notes_val,
                     tool_val,
+                    hole_id_val,
                     created_at,
                     updated_at,
                 ),
@@ -235,6 +238,7 @@ def _init_sqlite() -> None:
           label TEXT NOT NULL,
           notes TEXT,
           tool TEXT,
+          hole_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
@@ -268,6 +272,12 @@ def _init_sqlite() -> None:
     add_col("vehicle_location_mismatch", "ALTER TABLE shifts ADD COLUMN vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0;")
     add_col("shift_hours", "ALTER TABLE shifts ADD COLUMN shift_hours REAL NOT NULL DEFAULT 12;")
     add_col("shift_notes", "ALTER TABLE shifts ADD COLUMN shift_notes TEXT;")
+
+    # Add activity columns that may be missing in older DBs
+    act_cols = set(_sqlite_cols(c, "activities"))
+    if "hole_id" not in act_cols:
+        _retry_locked(lambda: c.execute("ALTER TABLE activities ADD COLUMN hole_id TEXT;"))
+        act_cols.add("hole_id")
 
     _sqlite_dedupe_shifts(c)
     _sqlite_migrate_activities_to_new(c)
@@ -307,11 +317,15 @@ def init_storage() -> None:
               ID NUMBER AUTOINCREMENT,
               SHIFT_DATE DATE, USERNAME STRING,
               START_TS TIMESTAMP_NTZ, END_TS TIMESTAMP_NTZ,
-              CODE STRING, LABEL STRING, NOTES STRING, TOOL STRING,
+              CODE STRING, LABEL STRING, NOTES STRING, TOOL STRING, HOLE_ID STRING,
               CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
             );
             """
         ).collect()
+        try:
+            s.sql("ALTER TABLE PUMA_ACTIVITIES ADD COLUMN HOLE_ID STRING;").collect()
+        except Exception:
+            pass
         return
 
     _init_sqlite()
@@ -511,7 +525,14 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
             "SELECT * FROM PUMA_ACTIVITIES WHERE SHIFT_DATE=TO_DATE(?) AND USERNAME=? ORDER BY START_TS ASC, ID ASC",
             params=[dt_str, username],
         ).collect()
-        return [dict(r.as_dict()) for r in rows]
+        out = []
+        for r in rows:
+            d = {k.lower(): v for k, v in r.as_dict().items()}
+            for fld in ("start_ts", "end_ts", "created_at", "updated_at"):
+                if isinstance(d.get(fld), (datetime, date)):
+                    d[fld] = d[fld].isoformat(timespec="seconds")
+            out.append(d)
+        return out
 
     conn = _sqlite_conn()
     sh = _sqlite_get_shift(conn, dt_str, username)
@@ -539,6 +560,7 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
                 d["notes"] = d.get("comments")
             if not d.get("tool"):
                 d["tool"] = d.get("tools_csv") or d.get("tool_ref")
+            d.setdefault("hole_id", d.get("hole_id"))
             out.append(d)
     else:
         rows = conn.execute(
@@ -557,6 +579,7 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
                 "label": d.get("label") or d.get("title") or d.get("description"),
                 "notes": d.get("notes") or d.get("comments") or "",
                 "tool": d.get("tool") or d.get("tool_ref") or d.get("tools_csv") or "",
+                "hole_id": d.get("hole_id"),
             })
     conn.close()
     return out
@@ -581,10 +604,10 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
         s.sql(
             """
             INSERT INTO PUMA_ACTIVITIES(
-              SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, CREATED_AT, UPDATED_AT
-            ) VALUES(TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+              SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, HOLE_ID, CREATED_AT, UPDATED_AT
+            ) VALUES(TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
             """,
-            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool")],
+            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id")],
         ).collect()
         return
 
@@ -611,6 +634,7 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
         "comments",
         "tool",
         "tools_csv",
+        "hole_id",
         "qaqc",
         "user_name",
         "created_at",
@@ -630,6 +654,7 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
         "comments": a.get("notes"),
         "tool": a.get("tool"),
         "tools_csv": a.get("tool"),
+        "hole_id": a.get("hole_id"),
         "qaqc": None,
         "user_name": username,
         "created_at": ts,
@@ -688,10 +713,10 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
             """
             UPDATE PUMA_ACTIVITIES
               SET START_TS=TO_TIMESTAMP_NTZ(?), END_TS=TO_TIMESTAMP_NTZ(?),
-                  CODE=?, LABEL=?, NOTES=?, TOOL=?, UPDATED_AT=CURRENT_TIMESTAMP()
+                  CODE=?, LABEL=?, NOTES=?, TOOL=?, HOLE_ID=?, UPDATED_AT=CURRENT_TIMESTAMP()
             WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;
             """,
-            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), int(activity_id), dt_str, username],
+            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id"), int(activity_id), dt_str, username],
         ).collect()
         return
 
@@ -708,10 +733,10 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
             lambda: conn.execute(
                 """
                 UPDATE activities
-                   SET start_ts=?, end_ts=?, code=?, label=?, notes=?, tool=?, updated_at=?
+                   SET start_ts=?, end_ts=?, code=?, label=?, notes=?, tool=?, hole_id=?, updated_at=?
                  WHERE id=? AND shift_id=?;
                 """,
-                (start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), ts, int(activity_id), sh["id"]),
+                (start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id"), ts, int(activity_id), sh["id"]),
             )
         )
     else:
@@ -719,10 +744,10 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
             lambda: conn.execute(
                 """
                 UPDATE activities
-                   SET start_time=?, end_time=?, code=?, description=?, tools_csv=?, comments=?, updated_at=?
+                   SET start_time=?, end_time=?, code=?, description=?, tools_csv=?, comments=?, hole_id=?, updated_at=?
                  WHERE id=? AND shift_id=?;
                 """,
-                (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), ts, int(activity_id), sh["id"]),
+                (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), a.get("hole_id"), ts, int(activity_id), sh["id"]),
             )
         )
     conn.commit()
