@@ -10,26 +10,36 @@ import storage
 
 CONFIG = Path("config")
 CLIENTS = ["RTIO", "RTC", "FMG", "FMGX", "Roy Hill", "Other"]
+CODE_COLORS = {
+    "LOG": "#C8102E",
+    "CAL": "#F7931E",
+    "SAF": "#2ECC71",
+    "ADM": "#2E8AE6",
+    "MTG": "#9B59B6",
+    "DWN": "#7F8C8D",
+    "OTH": "#95A5A6",
+    "__editing__": "#ffd24d",
+}
 THEMES = {
     "dark": {
-        "bg": "#0C1016",
-        "card": "#121926",
-        "panel": "#121926",
+        "bg": "#0B111B",
+        "card": "#111927",
+        "panel": "#111927",
         "muted": "#A9B6C7",
         "text": "#E8EDF3",
         "accent": "#C8102E",
-        "accent_alt": "#f15b2a",
+        "accent_alt": "#f7931e",
         "border": "rgba(255,255,255,0.08)",
         "shadow": "0 12px 32px rgba(0,0,0,0.35)",
     },
     "light": {
-        "bg": "#F6F8FB",
+        "bg": "#F4F6FA",
         "card": "#FFFFFF",
         "panel": "#FFFFFF",
         "muted": "#5B6572",
         "text": "#0A1220",
         "accent": "#C8102E",
-        "accent_alt": "#f15b2a",
+        "accent_alt": "#f7931e",
         "border": "rgba(0,0,0,0.08)",
         "shadow": "0 10px 24px rgba(0,0,0,0.08)",
     },
@@ -196,7 +206,7 @@ def shift_progress(shift: Dict[str, Any], acts: List[Dict[str, Any]]) -> float:
     return max(0.0, min(1.0, logged / total))
 
 
-def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]]):
+def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]], highlight_id: int | None = None):
     """Render a single-row timeline with segments for each activity, showing full shift window."""
     try:
         d = datetime.fromisoformat(shift["shift_date"]).date()
@@ -226,12 +236,17 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]]):
         hi = min(a1, end)
         if hi <= lo:
             continue
+        code_val = a.get("code")
+        label_val = a.get("label") or a.get("title") or ""
+        if highlight_id is not None and int(a.get("id")) == int(highlight_id):
+            code_val = "__editing__"
+            label_val = label_val or "Editing"
         rows.append({
             "Lane": "Shift",
             "Start": lo,
             "End": hi,
-            "Code": a.get("code"),
-            "Label": a.get("label") or a.get("title") or "",
+            "Code": code_val,
+            "Label": label_val,
             "Notes": a.get("notes") or "",
         })
 
@@ -239,6 +254,11 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]]):
         st.info("No in-window activities to display.")
         return
 
+    color_map = {"__shift__": "rgba(255,255,255,0.08)", "__editing__": CODE_COLORS.get("__editing__", "#ffd24d")}
+    for k, v in CODE_COLORS.items():
+        if k.startswith("__"):
+            continue
+        color_map.setdefault(k, v)
     fig = px.timeline(
         rows,
         x_start="Start",
@@ -247,6 +267,7 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]]):
         color="Code",
         hover_data={"Label": True, "Start": True, "End": True},
         text="Label",
+        color_discrete_map=color_map,
     )
     fig.update_yaxes(visible=False, showticklabels=False)
     fig.update_layout(
@@ -256,18 +277,26 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]]):
         showlegend=True,
         hovermode="x",
     )
-    fig.update_xaxes(range=[start, end], dtick=60 * 60 * 1000, tickformat="%H:%M", showgrid=True, gridcolor="rgba(255,255,255,0.08)", griddash="dot")
+    fig.update_xaxes(range=[start, end], dtick=60 * 60 * 1000, tickformat="%H:%M", showgrid=True, gridcolor="rgba(255,255,255,0.10)", griddash="dot")
     fig.update_traces(textposition="inside", insidetextanchor="middle", textfont_size=11, marker_line_width=0)
     for tr in fig.data:
         if tr.name == "__shift__":
             tr.showlegend = False
             tr.marker.color = "rgba(200,16,46,0.20)"
             tr.marker.line.width = 0
+        if tr.name == "__editing__":
+            tr.name = "Editing"
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
 
 def style(theme: str):
     palette = THEMES.get(theme, THEMES["dark"])
+    # Align Plotly template with theme
+    try:
+        import plotly.io as pio  # type: ignore
+        pio.templates.default = "plotly_dark" if theme == "dark" else "plotly_white"
+    except Exception:
+        pass
     st.markdown(
         f"""
         <style>
@@ -284,7 +313,7 @@ def style(theme: str):
           }}
           body {{
             background: radial-gradient(circle at 18% 22%, rgba(200,16,46,0.08), transparent 36%),
-                        radial-gradient(circle at 82% 4%, rgba(241,91,42,0.07), transparent 38%),
+                        radial-gradient(circle at 82% 4%, rgba(241,147,30,0.10), transparent 38%),
                         var(--wsg-bg);
             color: var(--wsg-text);
           }}
@@ -325,17 +354,21 @@ def login(users: List[str]):
 
 def topbar():
     d = datetime.fromisoformat(st.session_state.shift_date).date()
-    c1, c2, c3, c4 = st.columns([1.1, 2.6, 1.2, 1.1], vertical_alignment="center")
+    c1, c2, c3, c4 = st.columns([1.4, 2.6, 1.1, 1.0], vertical_alignment="center")
     with c1:
         st.markdown(f"<div class='card'><div class='muted'>User</div><div class='title-md'>{st.session_state.username}</div></div>", unsafe_allow_html=True)
+        if st.button("Log out", use_container_width=True):
+            for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
+                st.session_state.pop(k, None)
+            st.rerun()
     with c2:
-        a, b, c = st.columns([1, 2, 1], vertical_alignment="center")
-        with a:
+        nav = st.columns([1, 2, 1], vertical_alignment="center")
+        with nav[0]:
             if st.button("◀", use_container_width=True):
                 st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
-        with b:
+        with nav[1]:
             st.markdown(f"<div class='card' style='text-align:center;'><div class='muted'>Shift date</div><div class='title-md'>{d.strftime('%a %d %b %Y')}</div></div>", unsafe_allow_html=True)
-        with c:
+        with nav[2]:
             if st.button("▶", use_container_width=True):
                 st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
     with c3:
@@ -343,19 +376,19 @@ def topbar():
             st.session_state.shift_date = iso(date_cls.today()); st.session_state.view = "dd"; st.rerun()
         st.caption("One shift per user per day.")
     with c4:
-        label = "Switch to Light" if st.session_state.get("theme") == "dark" else "Switch to Dark"
+        label = "☀️ Light" if st.session_state.get("theme") == "dark" else "🌙 Dark"
         if st.button(label, key="theme_toggle", use_container_width=True):
             toggle_theme()
             st.rerun()
 
 
-def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], existing: Dict[str, Any] | None = None, missing: List[str] | None = None):
+def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], existing: Dict[str, Any] | None = None, missing: List[str] | None = None, form_key: str = "shift_form"):
     existing = existing or {}
     d = st.session_state.shift_date
     username = st.session_state.username
     missing = missing or []
 
-    with st.form("shift_form"):
+    with st.form(form_key):
         st.markdown("### Shift details")
         c1, c2 = st.columns([1.1, 1.1])
         with c1:
@@ -439,7 +472,7 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             st.error(" ".join(errs))
             return
 
-        storage.upsert_shift({
+        saved = storage.upsert_shift({
             "shift_date": d,
             "username": username,
             "client": client,
@@ -458,6 +491,7 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             "shift_hours": shift_hours,
             "shift_notes": notes.strip() if notes.strip() else None,
         })
+        st.session_state.latest_shift = saved
         st.session_state.view = "dd"
         st.success("Shift saved.")
         st.rerun()
@@ -614,6 +648,11 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
     code_choice = st.selectbox("Code", code_list, index=(code_list.index(code_default) if code_default in code_list else 0), key="edit_code_select")
     st.caption(f"**{code_choice}** — {label_by.get(code_choice, code_choice)}")
 
+    if st.button("Cancel editing", type="secondary"):
+        st.session_state.view = "dd"
+        st.session_state.edit_activity_id = None
+        st.rerun()
+
     with st.form("edit_act_form", clear_on_submit=False):
         c1, c2 = st.columns([1.0, 1.0])
         start_iso = act.get("start_ts") or (act.get("start_time") if act else None)
@@ -698,6 +737,10 @@ def main():
     st.divider()
 
     sh = storage.get_shift(st.session_state.shift_date, st.session_state.username)
+    latest = st.session_state.get("latest_shift")
+    if latest and latest.get("shift_date") == st.session_state.shift_date and latest.get("username") == st.session_state.username:
+        if not sh or latest.get("updated_at") >= sh.get("updated_at", ""):
+            sh = latest
     if sh:
         patched, changed = fill_shift_defaults(sh, vehicles, site_options)
         if changed and patched:
@@ -705,7 +748,7 @@ def main():
     if sh is None:
         st.markdown("## Create shift")
         st.info("One shift per user per day. Client + site + job number + vehicle are required.")
-        shift_form(vehicles, site_options)
+        shift_form(vehicles, site_options, form_key="shift_form_create")
         return
 
     if not is_shift_complete(sh):
@@ -725,7 +768,7 @@ def main():
             }
             st.error("Missing: " + ", ".join([human.get(m, m) for m in missing]))
         st.session_state.view = "edit_shift"
-        shift_form(vehicles, site_options, existing=sh, missing=missing)
+        shift_form(vehicles, site_options, existing=sh, missing=missing, form_key="shift_form_incomplete")
         return
 
     site_display = sh.get("site_other") if sh.get("site") == "Other" and sh.get("site_other") else sh.get("site")
@@ -735,44 +778,44 @@ def main():
         end_str = end_dt.strftime("%H:%M")
     except Exception:
         end_str = "—"
-    st.markdown(
-        f"""
-        <div class="card">
-          <div class="title-md">{site_display}</div>
-          <div class="tight-row" style="margin-top:6px;">
-            <span class="pill">Client: {sh.get('client')}</span>
-            <span class="pill">Job #: {sh.get('job_number')}</span>
-            <span class="pill">Vehicle: {sh.get('vehicle_name')} (#{sh.get('vehicle_barcode')})</span>
-            <span class="pill">Start: {sh.get('shift_start')}</span>
-            <span class="pill">End: {end_str}</span>
-            <span class="pill">Hours: {sh.get('shift_hours')}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with st.container():
+        col_info, col_edit = st.columns([4, 1], vertical_alignment="center")
+        with col_info:
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="title-md">{st.session_state.get('username', sh.get('username'))} — {datetime.fromisoformat(sh.get('shift_date')).strftime('%a %d %b %Y')}</div>
+                  <div class="muted" style="margin-bottom:6px;">Location: {site_display}</div>
+                  <div class="tight-row">
+                    <span class="pill">Client: {sh.get('client')}</span>
+                    <span class="pill">Job #: {sh.get('job_number')}</span>
+                    <span class="pill">Vehicle: {sh.get('vehicle_name')} (#{sh.get('vehicle_barcode')})</span>
+                    <span class="pill">Start: {sh.get('shift_start')}</span>
+                    <span class="pill">End: {end_str}</span>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col_edit:
+            if st.button("Edit shift", key="edit_shift_card", use_container_width=True):
+                st.session_state.view = "edit_shift"
+                st.rerun()
     if sh.get("vehicle_location_mismatch"):
         st.warning(f"Vehicle location mismatch flagged. Expected: {sh.get('vehicle_location_expected')} · Actual: {sh.get('vehicle_location_actual')}")
-
-    cta1, cta2, cta3 = st.columns([1.2, 1.2, 6], vertical_alignment="center")
-    with cta1:
-        if st.button("Add activity", type="primary", use_container_width=True):
-            st.session_state.view = "add_activity"
-    with cta2:
-        if st.button("Edit shift", use_container_width=True):
-            st.session_state.view = "edit_shift"
 
     acts = storage.list_activities(st.session_state.shift_date, st.session_state.username)
     st.markdown("### Shift coverage")
     st.progress(shift_progress(sh, acts), text="Coverage of scheduled shift")
     st.caption("The bar fills as activities cover time inside the shift window.")
     st.markdown("#### Activity timeline")
-    activity_timeline(sh, acts)
+    highlight_id = st.session_state.get("edit_activity_id") if st.session_state.get("view") == "edit_activity" else None
+    activity_timeline(sh, acts, highlight_id=highlight_id)
 
     if st.session_state.get("view") == "edit_shift":
         st.divider()
         st.markdown("## Edit shift")
-        shift_form(vehicles, site_options, existing=sh)
+        shift_form(vehicles, site_options, existing=sh, form_key="shift_form_edit")
 
     if st.session_state.get("view") == "add_activity":
         st.divider()
@@ -786,7 +829,14 @@ def main():
             edit_activity_form(catalog, sh, acts, target)
 
     st.divider()
-    st.markdown("## Activities")
+    hdr_l, hdr_r = st.columns([4, 1.3], vertical_alignment="center")
+    with hdr_l:
+        st.markdown("## Activities")
+    with hdr_r:
+        if st.button("Add activity", type="primary", use_container_width=True):
+            st.session_state.view = "add_activity"
+            st.session_state.edit_activity_id = None
+            st.rerun()
     if not acts:
         st.info("No activities yet.")
         return
@@ -806,25 +856,33 @@ def main():
         try:
             a0 = datetime.fromisoformat(a.get("start_ts"))
             a1 = datetime.fromisoformat(a.get("end_ts"))
-            duration_hr = max(0.0, (a1 - a0).total_seconds() / 3600)
+            duration_min = max(0, int((a1 - a0).total_seconds() // 60))
         except Exception:
             a0 = a1 = None
-            duration_hr = 0.0
-        header = f"<span class='pill'>{a.get('code')}</span> <strong>{a.get('label')}</strong>"
-        timing = f"{a.get('start_ts')} → {a.get('end_ts')} ({duration_hr:.1f} h)" if a0 and a1 else f"{a.get('start_ts')} → {a.get('end_ts')}"
-        meta_chips = []
+            duration_min = 0
+        start_str = a0.strftime("%H:%M") if a0 else a.get("start_ts")
+        end_str = a1.strftime("%H:%M") if a1 else a.get("end_ts")
+        dur_str = f"{duration_min//60}h {duration_min%60:02d}m"
+        code = a.get("code")
+        code_color = CODE_COLORS.get(code, "#6c7a89")
+        code_pill = f"<span class='pill' style='background:{code_color}; color:white; border:none;'>{code}</span>"
+        is_editing = st.session_state.get("edit_activity_id") == a.get("id") and st.session_state.get("view") == "edit_activity"
+        meta_bits = []
         if a.get("tool"):
-            meta_chips.append(f"<span class='chip'>Tool: {a.get('tool')}</span>")
+            meta_bits.append(f"Tool: {a.get('tool')}")
         if a.get("notes"):
-            meta_chips.append(f"<span class='chip'>Notes</span>")
+            meta_bits.append("Notes")
+
         with st.container(border=True):
+            if is_editing:
+                st.markdown("<div style='background:rgba(255,210,77,0.15); padding:6px 8px; border-radius:10px;'>Editing this activity</div>", unsafe_allow_html=True)
             c_left, c_right = st.columns([6, 1], vertical_alignment="center")
             with c_left:
-                st.markdown(f"{header}<br/><span class='muted'>{timing}</span>", unsafe_allow_html=True)
-                if meta_chips:
-                    st.markdown(" ".join(meta_chips), unsafe_allow_html=True)
+                st.markdown(f"{code_pill} <strong>{a.get('label')}</strong><br/><span class='muted'>{start_str} → {end_str} • {dur_str}</span>", unsafe_allow_html=True)
+                if meta_bits:
+                    st.caption(" · ".join(meta_bits))
                 if a.get("notes"):
-                    st.caption(a.get("notes"))
+                    st.write(a.get("notes"))
             with c_right:
                 if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", use_container_width=True):
                     st.session_state.edit_activity_id = int(a.get("id"))

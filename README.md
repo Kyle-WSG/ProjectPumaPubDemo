@@ -1,42 +1,29 @@
 # Project Puma — Daily Diary (Wireline Activity Log)
 
-Modern Streamlit UI for logging **one shift per user per day** (single vehicle + single site) with **multiple activities** per shift. Includes coverage bar that fills as you add activities.
+**Forked for a December demo**: this branch carries the current UX with theme toggle, editing flows, and shift/activity validation.
 
-## How it works
-- Login with a user from `config/users.json` (temporary, no auth).
-- Pick a shift date (no day/night split; exactly one shift per user per day).
-- Create/edit the shift: client, site, job number (required), vehicle (from catalog or manual), optional notes. Vehicle location is auto-filled from the catalog; if edited, the shift is flagged with `vehicle_location_mismatch` and both expected/actual locations are stored.
-- Add activities with start/end times, code, label, optional tool and notes. Coverage bar shows how much of the 12-hour window is filled by activities.
-- List and delete activities inline.
+Project Puma is a Streamlit app for capturing one shift per user per day (single vehicle + single site) with multiple activities. It stores data in SQLite by default and can switch to Snowflake automatically if a Snowpark session is active.
+
+## What it does
+- Login from `config/users.json` (simple dropdown, no auth).
+- Per day, per user: create or edit a shift (client, site, job number, vehicle snapshot, start/end times, optional notes).
+- Add activities with start/end, code/label, tool (for LOG/CAL), notes; conflict checks prevent overlaps and defaults pick the first free slot in the shift window.
+- Timeline shows the full shift window plus activities, with coverage bar. Edit mode highlights the active activity.
+- Activities can be edited or deleted inline; cards show time range, duration, code colors, tool/notes hints.
 
 ## Data model
-SQLite at `data/project_puma.db` (Snowflake supported if a Snowpark session is active).
+SQLite DB at `data/project_puma.db` (Snowflake when a Snowpark session is available).
 
-### vehicles
-- `barcode` (PK), `name`, `description`, `model`, `category`, `location`
+- `vehicles`: `barcode` (PK), `name`, `description`, `model`, `category`, `location`
+- `shifts` (one per user per date): `id`, `shift_date`, `username`, `client`, `site`, `site_other`, `job_number`, `vehicle_*` snapshot, `shift_start`, `shift_hours`, `shift_notes`, `created_at`, `updated_at`
+- `activities`: `id`, `shift_id` (FK), `start_ts`, `end_ts`, `code`, `label`, `tool`, `notes`, `created_at`, `updated_at`
 
-### shifts` (one per user per date)
-- `id` (PK), `shift_date` (ISO date), `username`
-- `client`, `site`, `site_other`
-- `job_number`
-- Vehicle snapshot: `vehicle_barcode`, `vehicle_name`, `vehicle_description`, `vehicle_model`, `vehicle_category`
-- Location tracking: `vehicle_location_expected`, `vehicle_location_actual`, `vehicle_location_mismatch` (0/1)
-- `shift_start` (HH:MM), `shift_hours` (default 12), `shift_notes`
-- `created_at`, `updated_at`
-- Unique per (`shift_date`, `username`); legacy duplicates are deduped by keeping the latest and reattaching activities.
-
-### activities
-- `id` (PK), `shift_id` (FK → shifts.id)
-- `start_ts`, `end_ts` (ISO datetime strings)
-- `code`, `label`, `tool`, `notes`
-- `created_at`, `updated_at`
-
-Relationships: **shifts (1) → (many) activities**; vehicle data is snapshotted onto the shift to keep historical context even if the catalog changes.
+Legacy data is migrated on startup; duplicates are deduped by keeping the latest and reattaching activities.
 
 ## Config
-- `config/users.json` — `{"users":[...]} ` dropdown for login.
-- `config/catalog.json` — activity codes + tools shown in the add-activity form.
-- `config/vehicles_catalog.json` — generated from the supplied CSV (barcode, name, description, model, category, location). Used to auto-fill vehicle/location and to populate the vehicle dropdown.
+- `config/users.json` — user list for login.
+- `config/catalog.json` — activity codes + tools for the add/edit activity forms.
+- `config/vehicles_catalog.json` — vehicle master data (barcode, name, description, model, category, location).
 
 ## Running locally
 ```bash
@@ -47,6 +34,6 @@ streamlit run app.py
 ```
 
 ## Code map
-- `app.py`: Streamlit UI. Handles login, date navigation, shift form, activity form, coverage bar, and activity list.
-- `storage.py`: Data layer. Initializes/migrates SQLite (or Snowflake), enforces one shift per user per day, dedupes legacy rows, snapshots vehicle/location data, and provides CRUD for shifts/activities.
+- `app.py`: Streamlit UI; handles login, theming, shift CRUD, activity add/edit/delete, timeline/coverage, conflict checks, and layout.
+- `storage.py`: Data layer; initializes/migrates SQLite (or Snowflake), enforces one shift per user/day, snapshots vehicle/location data, and provides CRUD for shifts/activities.
 - `config/*.json`: Inputs for users, activity codes/tools, vehicle catalog.
