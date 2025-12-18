@@ -48,7 +48,7 @@ THEMES = {
         "shadow": "0 10px 24px rgba(0,0,0,0.08)",
     },
 }
-VERSION = "Alpha_2025_5"
+VERSION = "Alpha_2025_7"
 
 
 def jload(path: Path, default: Any) -> Any:
@@ -710,7 +710,10 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
             selected_tools = st.multiselect("Tools (LOG/CAL only)", tools, default=default_tools, key="tool_select_multi")
         else:
             st.session_state.pop("tool_select_multi", None)
-        hole_id = st.text_input("Hole ID (optional)", placeholder="Enter hole ID or leave blank")
+        hole_id = None
+        if code_choice == "LOG":
+            hole_input = st.text_input("Hole ID (LOG only)", placeholder="Leave blank to auto-generate a unique ID")
+            hole_id = hole_input.strip() if hole_input.strip() else None
         notes = st.text_area("Notes (optional)", height=80)
 
         ok = st.form_submit_button("Add activity", type="primary", use_container_width=True)
@@ -739,7 +742,7 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
             "code": code_choice,
             "label": label_by.get(code_choice, code_choice),
             "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else None),
-            "hole_id": hole_id.strip() if hole_id.strip() else None,
+            "hole_id": hole_id,
             "notes": notes.strip() if notes.strip() else None,
         })
         st.session_state.view = "dd"
@@ -804,7 +807,10 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         else:
             st.session_state.pop("tool_select_edit_multi", None)
 
-        hole_id_val = st.text_input("Hole ID (optional)", value=str(act.get("hole_id") or ""))
+        hole_id_val = act.get("hole_id")
+        if code_choice == "LOG":
+            hole_input = st.text_input("Hole ID (LOG only)", value=str(act.get("hole_id") or ""), placeholder="Leave blank to auto-generate a unique ID")
+            hole_id_val = hole_input.strip() if hole_input.strip() else None
         notes = st.text_area("Notes (optional)", height=80, value=str(act.get("notes") or ""))
 
         ok = st.form_submit_button("Save changes", type="primary", use_container_width=True)
@@ -835,7 +841,7 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
             "code": code_choice,
             "label": label_by.get(code_choice, code_choice),
             "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else (act.get("tool") if code_choice not in {"LOG", "CAL"} else None)),
-            "hole_id": hole_id_val.strip() if hole_id_val.strip() else None,
+            "hole_id": hole_id_val,
             "notes": notes.strip() if notes.strip() else None,
         })
         st.session_state.view = "dd"

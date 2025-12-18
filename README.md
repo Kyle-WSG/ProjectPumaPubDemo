@@ -16,8 +16,11 @@ Project Puma is a Streamlit app for capturing one shift per user per day (single
 SQLite DB at `data/project_puma.db` (Snowflake when a Snowpark session is available).
 
 - `vehicles`: `barcode` (PK), `name`, `description`, `model`, `category`, `location`
+- `holes`: `hole_id` (PK), `created_at`, `updated_at`
 - `shifts` (one per user per date): `id`, `shift_date`, `username`, `client`, `site`, `site_other`, `job_number`, `vehicle_*` snapshot, `shift_start`, `shift_hours`, `shift_notes`, `created_at`, `updated_at`
-- `activities`: `id`, `shift_id` (FK), `start_ts`, `end_ts`, `code`, `label`, `tool`, `notes`, `created_at`, `updated_at`
+- `activities`: `id`, `shift_id` (FK), `start_ts`, `end_ts`, `code`, `label`, `tool`, `notes`, `hole_id` (FK), `created_at`, `updated_at`
+
+`activities.hole_id` references `holes.hole_id` (one hole can be referenced by multiple LOG activities).
 
 Legacy data is migrated on startup; duplicates are deduped by keeping the latest and reattaching activities.
 

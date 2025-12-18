@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import time
+import uuid
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,17 @@ DB_PATH = os.path.join("data", "project_puma.db")
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _normalize_hole_id(hole_id: Any) -> Optional[str]:
+    if hole_id is None:
+        return None
+    val = str(hole_id).strip()
+    return val if val else None
+
+
+def _generate_hole_id() -> str:
+    return str(uuid.uuid4())
 
 
 def _try_get_sf_session():
@@ -22,6 +34,22 @@ def _try_get_sf_session():
 
 def backend() -> str:
     return "snowflake" if _try_get_sf_session() is not None else "sqlite"
+
+
+def _sf_ensure_hole(s, hole_id: Optional[str]) -> None:
+    if not hole_id:
+        return
+    s.sql(
+        """
+        MERGE INTO PUMA_HOLES t
+        USING (SELECT ? HOLE_ID) src
+        ON t.HOLE_ID = src.HOLE_ID
+        WHEN MATCHED THEN UPDATE SET UPDATED_AT=CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN INSERT (HOLE_ID, CREATED_AT, UPDATED_AT)
+        VALUES(?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+        """,
+        params=[hole_id, hole_id],
+    ).collect()
 
 
 def _load_json(path: str, default: Any) -> Any:
@@ -58,6 +86,51 @@ def _sqlite_cols(conn: sqlite3.Connection, table: str) -> List[str]:
     return [r[1] for r in rows]
 
 
+def _sqlite_col_defaults(conn: sqlite3.Connection, table: str) -> Dict[str, Any]:
+    rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
+    return {r[1]: r[4] for r in rows}
+
+
+def _sqlite_has_hole_fk(conn: sqlite3.Connection) -> bool:
+    try:
+        rows = conn.execute("PRAGMA foreign_key_list(activities);").fetchall()
+    except Exception:
+        return False
+    for r in rows:
+        if len(r) >= 4 and r[2] == "holes" and r[3] == "hole_id":
+            return True
+    return False
+
+
+def _sqlite_ensure_holes_table(conn: sqlite3.Connection) -> None:
+    _retry_locked(
+        lambda: conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS holes(
+              hole_id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+    )
+
+
+def _sqlite_upsert_hole(conn: sqlite3.Connection, hole_id: str, ts: str) -> None:
+    if not hole_id:
+        return
+    _retry_locked(
+        lambda: conn.execute(
+            """
+            INSERT INTO holes(hole_id, created_at, updated_at)
+            VALUES(?,?,?)
+            ON CONFLICT(hole_id) DO UPDATE SET updated_at=excluded.updated_at;
+            """,
+            (hole_id, ts, ts),
+        )
+    )
+
+
 def _retry_locked(fn, retries: int = 30):
     for i in range(retries):
         try:
@@ -82,16 +155,26 @@ def _sqlite_activity_schema(conn: sqlite3.Connection) -> str:
 def _sqlite_dedupe_shifts(conn: sqlite3.Connection) -> None:
     """Keep one shift per (shift_date, username); move activities to the keep_id."""
     try:
+        cols = set(_sqlite_cols(conn, "shifts"))
+        if "shift_date" not in cols or "username" not in cols:
+            return
         dupes = conn.execute(
-            "SELECT shift_date, username, MIN(id) keep_id, GROUP_CONCAT(id) ids, COUNT(*) n "
+            "SELECT shift_date, username, COUNT(*) n "
             "FROM shifts GROUP BY shift_date, username HAVING n > 1;"
         ).fetchall()
         for r in dupes:
-            keep_id = int(r[2])
-            ids = [int(x) for x in str(r[3]).split(",") if x.strip().isdigit()]
-            for sid in ids:
-                if sid == keep_id:
-                    continue
+            shift_date = r[0]
+            username = r[1]
+            rows = conn.execute(
+                "SELECT id FROM shifts WHERE shift_date=? AND username=? "
+                "ORDER BY COALESCE(updated_at, created_at, '') DESC, id DESC;",
+                (shift_date, username),
+            ).fetchall()
+            if not rows:
+                continue
+            keep_id = int(rows[0][0])
+            for r_id in rows[1:]:
+                sid = int(r_id[0])
                 _retry_locked(lambda: conn.execute("UPDATE activities SET shift_id=? WHERE shift_id=?;", (keep_id, sid)))
                 _retry_locked(lambda: conn.execute("DELETE FROM shifts WHERE id=?;", (sid,)))
     except Exception:
@@ -110,10 +193,34 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
         or "end_ts" not in cols
         or "code" not in cols
         or "label" not in cols
+        or "hole_id" not in cols
         or "start_time" in cols
         or "end_time" in cols
     )
+    if not _sqlite_has_hole_fk(conn):
+        needs_migration = True
+    _sqlite_ensure_holes_table(conn)
     if not needs_migration:
+        try:
+            rows = conn.execute("SELECT id, code, hole_id, created_at, updated_at FROM activities;").fetchall()
+        except Exception:
+            return
+        now_ts = _now()
+        for r in rows:
+            d = dict(r)
+            hole_id_val = _normalize_hole_id(d.get("hole_id"))
+            code_val = d.get("code")
+            if code_val == "LOG" and not hole_id_val:
+                hole_id_val = _generate_hole_id()
+                _retry_locked(
+                    lambda: conn.execute(
+                        "UPDATE activities SET hole_id=?, updated_at=? WHERE id=?;",
+                        (hole_id_val, now_ts, int(d.get("id"))),
+                    )
+                )
+            ts = d.get("updated_at") or d.get("created_at") or now_ts
+            if hole_id_val:
+                _sqlite_upsert_hole(conn, hole_id_val, ts)
         return
 
     _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities_new;"))
@@ -132,7 +239,8 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
               hole_id TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+              FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE,
+              FOREIGN KEY(hole_id) REFERENCES holes(hole_id) ON DELETE SET NULL
             );
             """
         )
@@ -154,10 +262,14 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
         label_val = d.get("label") or d.get("title") or d.get("description") or "Activity"
         notes_val = d.get("notes") or d.get("comments")
         tool_val = d.get("tool") or d.get("tool_ref") or d.get("tools_csv")
-        hole_id_val = d.get("hole_id")
+        hole_id_val = _normalize_hole_id(d.get("hole_id"))
         code_val = d.get("code") or "OTH"
+        if code_val == "LOG" and not hole_id_val:
+            hole_id_val = _generate_hole_id()
         created_at = d.get("created_at") or now_ts
         updated_at = d.get("updated_at") or created_at
+        if hole_id_val:
+            _sqlite_upsert_hole(conn, hole_id_val, updated_at)
         _retry_locked(
             lambda: conn.execute(
                 """
@@ -182,7 +294,265 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
     _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities;"))
     _retry_locked(lambda: conn.execute("ALTER TABLE activities_new RENAME TO activities;"))
     _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);"))
+    _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_hole_id ON activities(hole_id);"))
 
+
+def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
+    cols = set(_sqlite_cols(conn, "shifts"))
+    if not cols:
+        return
+
+    canonical_cols = {
+        "id",
+        "shift_date",
+        "username",
+        "client",
+        "site",
+        "site_other",
+        "job_number",
+        "vehicle_barcode",
+        "vehicle_name",
+        "vehicle_description",
+        "vehicle_model",
+        "vehicle_category",
+        "vehicle_location_expected",
+        "vehicle_location_actual",
+        "vehicle_location_mismatch",
+        "shift_start",
+        "shift_hours",
+        "shift_notes",
+        "created_at",
+        "updated_at",
+    }
+
+    missing = canonical_cols - cols
+    extras = cols - canonical_cols
+    if not missing and not extras:
+        return
+
+    defaults = _sqlite_col_defaults(conn, "shifts")
+    default_username = defaults.get("username")
+    if isinstance(default_username, str):
+        default_username = default_username.strip()
+        if len(default_username) >= 2 and default_username[0] == default_username[-1] and default_username[0] in {"'", "\""}:
+            default_username = default_username[1:-1]
+
+    rows = conn.execute("SELECT * FROM shifts;").fetchall()
+    now_ts = _now()
+
+    def clean(val: Any) -> str:
+        return str(val).strip() if val is not None else ""
+
+    def coerce_date(val: Any) -> str:
+        s = clean(val)
+        if not s:
+            return date.today().isoformat()
+        try:
+            return datetime.fromisoformat(s).date().isoformat()
+        except Exception:
+            if len(s) >= 10:
+                try:
+                    return datetime.fromisoformat(s[:10]).date().isoformat()
+                except Exception:
+                    pass
+        return date.today().isoformat()
+
+    def coerce_time(val: Any) -> str:
+        s = clean(val)
+        if not s:
+            return "06:00"
+        if "T" in s:
+            try:
+                return datetime.fromisoformat(s).strftime("%H:%M")
+            except Exception:
+                pass
+        parts = s.split(":")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+        return "06:00"
+
+    def coerce_hours(val: Any) -> float:
+        try:
+            hours = float(val)
+        except Exception:
+            hours = 12.0
+        if hours <= 0:
+            hours = 12.0
+        return hours
+
+    def parse_ts(val: Any) -> Optional[datetime]:
+        if val is None:
+            return None
+        try:
+            return datetime.fromisoformat(str(val))
+        except Exception:
+            return None
+
+    def to_int_bool(val: Any) -> int:
+        if val is None:
+            return 0
+        try:
+            return 1 if int(val) else 0
+        except Exception:
+            return 1 if str(val).strip().lower() in {"true", "yes", "y", "1"} else 0
+
+    canonical_by_id: Dict[int, Dict[str, Any]] = {}
+    keep_by_key: Dict[tuple[str, str], int] = {}
+    best_key: Dict[tuple[str, str], tuple[datetime, int]] = {}
+
+    for r in rows:
+        d = dict(r)
+        if d.get("id") is None:
+            continue
+        old_id = int(d.get("id"))
+
+        username = clean(d.get("username"))
+        active_user = clean(d.get("active_user"))
+        if not username and active_user:
+            username = active_user
+        if active_user and default_username and username == default_username:
+            username = active_user
+        if not username:
+            username = "UNKNOWN"
+
+        shift_date = coerce_date(d.get("shift_date"))
+        client = clean(d.get("client")) or "Other"
+
+        site = clean(d.get("site"))
+        site_other = clean(d.get("site_other"))
+        site_name = clean(d.get("site_name"))
+        if not site and site_name:
+            site = "Other"
+            if not site_other:
+                site_other = site_name
+        if site in {"Other", "Other (manual)"} and site_name and not site_other:
+            site_other = site_name
+        if not site:
+            site = "Other"
+
+        job_number = clean(d.get("job_number")) or "UNKNOWN"
+
+        vehicle_barcode = clean(d.get("vehicle_barcode"))
+        vehicle_name = clean(d.get("vehicle_name"))
+        legacy_vehicle = clean(d.get("vehicle"))
+        if not vehicle_barcode and legacy_vehicle:
+            vehicle_barcode = legacy_vehicle
+        if not vehicle_name and legacy_vehicle:
+            vehicle_name = legacy_vehicle
+        if not vehicle_barcode:
+            vehicle_barcode = "UNSET"
+        if not vehicle_name:
+            vehicle_name = "Vehicle"
+
+        created_at = clean(d.get("created_at")) or now_ts
+        updated_at = clean(d.get("updated_at")) or created_at
+
+        canon = {
+            "id": old_id,
+            "shift_date": shift_date,
+            "username": username,
+            "client": client,
+            "site": site,
+            "site_other": site_other or None,
+            "job_number": job_number,
+            "vehicle_barcode": vehicle_barcode,
+            "vehicle_name": vehicle_name,
+            "vehicle_description": clean(d.get("vehicle_description")) or None,
+            "vehicle_model": clean(d.get("vehicle_model")) or None,
+            "vehicle_category": clean(d.get("vehicle_category")) or None,
+            "vehicle_location_expected": clean(d.get("vehicle_location_expected")) or None,
+            "vehicle_location_actual": clean(d.get("vehicle_location_actual")) or None,
+            "vehicle_location_mismatch": to_int_bool(d.get("vehicle_location_mismatch")),
+            "shift_start": coerce_time(d.get("shift_start")),
+            "shift_hours": coerce_hours(d.get("shift_hours")),
+            "shift_notes": clean(d.get("shift_notes")) or None,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+        canonical_by_id[old_id] = canon
+
+        key = (shift_date, username)
+        ts = parse_ts(updated_at) or parse_ts(created_at) or datetime.min
+        sort_key = (ts, old_id)
+        if key not in best_key or sort_key > best_key[key]:
+            best_key[key] = sort_key
+            keep_by_key[key] = old_id
+
+    conn.execute("PRAGMA foreign_keys=OFF;")
+    try:
+        _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS shifts_new;"))
+        _retry_locked(
+            lambda: conn.execute(
+                """
+                CREATE TABLE shifts_new(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  shift_date TEXT NOT NULL,
+                  username TEXT NOT NULL,
+                  client TEXT NOT NULL,
+                  site TEXT NOT NULL,
+                  site_other TEXT,
+                  job_number TEXT NOT NULL,
+                  vehicle_barcode TEXT NOT NULL,
+                  vehicle_name TEXT NOT NULL,
+                  vehicle_description TEXT,
+                  vehicle_model TEXT,
+                  vehicle_category TEXT,
+                  vehicle_location_expected TEXT,
+                  vehicle_location_actual TEXT,
+                  vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0,
+                  shift_start TEXT NOT NULL,
+                  shift_hours REAL NOT NULL DEFAULT 12,
+                  shift_notes TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                """
+            )
+        )
+
+        if canonical_by_id:
+            insert_cols = [
+                "id",
+                "shift_date",
+                "username",
+                "client",
+                "site",
+                "site_other",
+                "job_number",
+                "vehicle_barcode",
+                "vehicle_name",
+                "vehicle_description",
+                "vehicle_model",
+                "vehicle_category",
+                "vehicle_location_expected",
+                "vehicle_location_actual",
+                "vehicle_location_mismatch",
+                "shift_start",
+                "shift_hours",
+                "shift_notes",
+                "created_at",
+                "updated_at",
+            ]
+            placeholders = ",".join(["?"] * len(insert_cols))
+            insert_sql = f"INSERT INTO shifts_new({','.join(insert_cols)}) VALUES({placeholders});"
+
+            for keep_id in keep_by_key.values():
+                canon = canonical_by_id.get(keep_id)
+                if not canon:
+                    continue
+                values = [canon.get(col) for col in insert_cols]
+                _retry_locked(lambda: conn.execute(insert_sql, values))
+
+            for old_id, canon in canonical_by_id.items():
+                keep_id = keep_by_key.get((canon["shift_date"], canon["username"]))
+                if keep_id is None or old_id == keep_id:
+                    continue
+                _retry_locked(lambda: conn.execute("UPDATE activities SET shift_id=? WHERE shift_id=?;", (keep_id, old_id)))
+
+        _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS shifts;"))
+        _retry_locked(lambda: conn.execute("ALTER TABLE shifts_new RENAME TO shifts;"))
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON;")
 
 def _init_sqlite() -> None:
     c = _sqlite_conn()
@@ -196,6 +566,16 @@ def _init_sqlite() -> None:
           model TEXT,
           category TEXT,
           location TEXT
+        );
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS holes(
+          hole_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
         );
         """
     )
@@ -241,46 +621,20 @@ def _init_sqlite() -> None:
           hole_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
-          FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+          FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE,
+          FOREIGN KEY(hole_id) REFERENCES holes(hole_id) ON DELETE SET NULL
         );
         """
     )
 
+    _sqlite_migrate_shifts_to_new(c)
+    _sqlite_migrate_activities_to_new(c)
+    _sqlite_dedupe_shifts(c)
+
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_shifts_user_day ON shifts(shift_date, username);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(username, shift_date);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);")
-
-    # Add columns if the DB was created with an older schema
-    cols = set(_sqlite_cols(c, "shifts"))
-
-    def add_col(name: str, ddl: str) -> None:
-        if name in cols:
-            return
-        _retry_locked(lambda: c.execute(ddl))
-        cols.add(name)
-
-    add_col("client", "ALTER TABLE shifts ADD COLUMN client TEXT NOT NULL DEFAULT 'Other';")
-    add_col("site", "ALTER TABLE shifts ADD COLUMN site TEXT NOT NULL DEFAULT 'Other';")
-    add_col("site_other", "ALTER TABLE shifts ADD COLUMN site_other TEXT;")
-    add_col("job_number", "ALTER TABLE shifts ADD COLUMN job_number TEXT NOT NULL DEFAULT 'UNKNOWN';")
-    add_col("vehicle_barcode", "ALTER TABLE shifts ADD COLUMN vehicle_barcode TEXT NOT NULL DEFAULT 'UNSET';")
-    add_col("vehicle_name", "ALTER TABLE shifts ADD COLUMN vehicle_name TEXT NOT NULL DEFAULT 'UNSET';")
-    add_col("vehicle_description", "ALTER TABLE shifts ADD COLUMN vehicle_description TEXT;")
-    add_col("vehicle_model", "ALTER TABLE shifts ADD COLUMN vehicle_model TEXT;")
-    add_col("vehicle_category", "ALTER TABLE shifts ADD COLUMN vehicle_category TEXT;")
-    add_col("vehicle_location_expected", "ALTER TABLE shifts ADD COLUMN vehicle_location_expected TEXT;")
-    add_col("vehicle_location_actual", "ALTER TABLE shifts ADD COLUMN vehicle_location_actual TEXT;")
-    add_col("vehicle_location_mismatch", "ALTER TABLE shifts ADD COLUMN vehicle_location_mismatch INTEGER NOT NULL DEFAULT 0;")
-    add_col("shift_hours", "ALTER TABLE shifts ADD COLUMN shift_hours REAL NOT NULL DEFAULT 12;")
-    add_col("shift_notes", "ALTER TABLE shifts ADD COLUMN shift_notes TEXT;")
-
-    # Add activity columns that may be missing in older DBs
-    act_cols = set(_sqlite_cols(c, "activities"))
-    if "hole_id" not in act_cols:
-        _retry_locked(lambda: c.execute("ALTER TABLE activities ADD COLUMN hole_id TEXT;"))
-        act_cols.add("hole_id")
-
-    _sqlite_dedupe_shifts(c)
-    _sqlite_migrate_activities_to_new(c)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_acts_hole_id ON activities(hole_id);")
     c.commit()
     c.close()
 
@@ -307,6 +661,16 @@ def init_storage() -> None:
               VEHICLE_LOCATION_EXPECTED STRING, VEHICLE_LOCATION_ACTUAL STRING, VEHICLE_LOCATION_MISMATCH BOOLEAN,
               SHIFT_START STRING, SHIFT_HOURS FLOAT, SHIFT_NOTES STRING,
               CREATED_AT TIMESTAMP_NTZ, UPDATED_AT TIMESTAMP_NTZ
+            );
+            """
+        ).collect()
+
+        s.sql(
+            """
+            CREATE TABLE IF NOT EXISTS PUMA_HOLES(
+              HOLE_ID STRING,
+              CREATED_AT TIMESTAMP_NTZ,
+              UPDATED_AT TIMESTAMP_NTZ
             );
             """
         ).collect()
@@ -649,6 +1013,9 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
     end_val = a.get("end_ts") or a.get("end_time") or start_val
     code_val = a.get("code")
     label_val = a.get("label")
+    hole_id_val = _normalize_hole_id(a.get("hole_id"))
+    if code_val == "LOG" and not hole_id_val:
+        hole_id_val = _generate_hole_id()
 
     for name, val in (("start_ts", start_val), ("end_ts", end_val), ("code", code_val), ("label", label_val)):
         if val is None or (isinstance(val, str) and not str(val).strip()):
@@ -659,13 +1026,14 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
+        _sf_ensure_hole(s, hole_id_val)
         s.sql(
             """
             INSERT INTO PUMA_ACTIVITIES(
               SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, HOLE_ID, CREATED_AT, UPDATED_AT
             ) VALUES(TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
             """,
-            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id")],
+            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val],
         ).collect()
         return
 
@@ -676,6 +1044,8 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
         raise ValueError("Shift does not exist yet.")
 
     ts = _now()
+    if hole_id_val:
+        _sqlite_upsert_hole(conn, hole_id_val, ts)
     cols = set(_sqlite_cols(conn, "activities"))
     # Populate both new and legacy columns when present to avoid NOT NULL conflicts on hybrid schemas.
     ordered_fields = [
@@ -712,7 +1082,7 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
         "comments": a.get("notes"),
         "tool": a.get("tool"),
         "tools_csv": a.get("tool"),
-        "hole_id": a.get("hole_id"),
+        "hole_id": hole_id_val,
         "qaqc": None,
         "user_name": username,
         "created_at": ts,
@@ -757,6 +1127,9 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
     end_val = a.get("end_ts") or a.get("end_time") or start_val
     code_val = a.get("code")
     label_val = a.get("label")
+    hole_id_val = _normalize_hole_id(a.get("hole_id"))
+    if code_val == "LOG" and not hole_id_val:
+        hole_id_val = _generate_hole_id()
 
     for name, val in (("start_ts", start_val), ("end_ts", end_val), ("code", code_val), ("label", label_val)):
         if val is None or (isinstance(val, str) and not str(val).strip()):
@@ -767,6 +1140,7 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
+        _sf_ensure_hole(s, hole_id_val)
         s.sql(
             """
             UPDATE PUMA_ACTIVITIES
@@ -774,7 +1148,7 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
                   CODE=?, LABEL=?, NOTES=?, TOOL=?, HOLE_ID=?, UPDATED_AT=CURRENT_TIMESTAMP()
             WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;
             """,
-            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id"), int(activity_id), dt_str, username],
+            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val, int(activity_id), dt_str, username],
         ).collect()
         return
 
@@ -786,6 +1160,8 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
 
     schema = _sqlite_activity_schema(conn)
     ts = _now()
+    if hole_id_val:
+        _sqlite_upsert_hole(conn, hole_id_val, ts)
     if schema == "new":
         _retry_locked(
             lambda: conn.execute(
@@ -794,7 +1170,7 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
                    SET start_ts=?, end_ts=?, code=?, label=?, notes=?, tool=?, hole_id=?, updated_at=?
                  WHERE id=? AND shift_id=?;
                 """,
-                (start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), a.get("hole_id"), ts, int(activity_id), sh["id"]),
+                (start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val, ts, int(activity_id), sh["id"]),
             )
         )
     else:
@@ -805,7 +1181,7 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
                    SET start_time=?, end_time=?, code=?, description=?, tools_csv=?, comments=?, hole_id=?, updated_at=?
                  WHERE id=? AND shift_id=?;
                 """,
-                (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), a.get("hole_id"), ts, int(activity_id), sh["id"]),
+                (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), hole_id_val, ts, int(activity_id), sh["id"]),
             )
         )
     conn.commit()
