@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import sqlite3
@@ -11,6 +12,10 @@ DB_PATH = os.path.join("data", "project_puma.db")
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _normalize_hole_id(hole_id: Any) -> Optional[str]:
@@ -36,19 +41,19 @@ def backend() -> str:
     return "snowflake" if _try_get_sf_session() is not None else "sqlite"
 
 
-def _sf_ensure_hole(s, hole_id: Optional[str]) -> None:
+def _sf_ensure_hole(s, hole_id: Optional[str], hole_name: Optional[str] = None) -> None:
     if not hole_id:
         return
     s.sql(
         """
         MERGE INTO PUMA_HOLES t
-        USING (SELECT ? HOLE_ID) src
+        USING (SELECT ? HOLE_ID, ? HOLE_NAME) src
         ON t.HOLE_ID = src.HOLE_ID
-        WHEN MATCHED THEN UPDATE SET UPDATED_AT=CURRENT_TIMESTAMP()
-        WHEN NOT MATCHED THEN INSERT (HOLE_ID, CREATED_AT, UPDATED_AT)
-        VALUES(?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+        WHEN MATCHED THEN UPDATE SET UPDATED_AT=CURRENT_TIMESTAMP(), HOLE_NAME=COALESCE(src.HOLE_NAME, t.HOLE_NAME)
+        WHEN NOT MATCHED THEN INSERT (HOLE_ID, HOLE_NAME, CREATED_AT, UPDATED_AT)
+        VALUES(?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
         """,
-        params=[hole_id, hole_id],
+        params=[hole_id, hole_name, hole_id, hole_name],
     ).collect()
 
 
@@ -108,6 +113,7 @@ def _sqlite_ensure_holes_table(conn: sqlite3.Connection) -> None:
             """
             CREATE TABLE IF NOT EXISTS holes(
               hole_id TEXT PRIMARY KEY,
+              hole_name TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -115,18 +121,33 @@ def _sqlite_ensure_holes_table(conn: sqlite3.Connection) -> None:
         )
     )
 
+def _sqlite_ensure_hole_name_column(conn: sqlite3.Connection) -> None:
+    try:
+        cols = set(_sqlite_cols(conn, "holes"))
+    except Exception:
+        return
+    if "hole_name" in cols:
+        return
+    try:
+        _retry_locked(lambda: conn.execute("ALTER TABLE holes ADD COLUMN hole_name TEXT;"))
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
 
-def _sqlite_upsert_hole(conn: sqlite3.Connection, hole_id: str, ts: str) -> None:
+
+def _sqlite_upsert_hole(conn: sqlite3.Connection, hole_id: str, ts: str, hole_name: Optional[str] = None) -> None:
     if not hole_id:
         return
     _retry_locked(
         lambda: conn.execute(
             """
-            INSERT INTO holes(hole_id, created_at, updated_at)
-            VALUES(?,?,?)
-            ON CONFLICT(hole_id) DO UPDATE SET updated_at=excluded.updated_at;
+            INSERT INTO holes(hole_id, hole_name, created_at, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(hole_id) DO UPDATE SET
+              hole_name=COALESCE(excluded.hole_name, holes.hole_name),
+              updated_at=excluded.updated_at;
             """,
-            (hole_id, ts, ts),
+            (hole_id, hole_name, ts, ts),
         )
     )
 
@@ -251,8 +272,20 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT * FROM activities;").fetchall()
     except Exception:
         rows = []
+    try:
+        shift_ids = {int(r[0]) for r in conn.execute("SELECT id FROM shifts;").fetchall()}
+    except Exception:
+        shift_ids = set()
     for r in rows:
         d = dict(r)
+        try:
+            shift_id_val = int(d.get("shift_id")) if d.get("shift_id") is not None else None
+        except Exception:
+            shift_id_val = None
+        if not shift_ids:
+            continue
+        if shift_id_val is None or shift_id_val not in shift_ids:
+            continue
         start_val = d.get("start_ts") or d.get("start_time") or d.get("start") or d.get("begin_time")
         end_val = d.get("end_ts") or d.get("end_time") or d.get("end") or d.get("finish_time") or start_val
         if not start_val:
@@ -273,11 +306,12 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
         _retry_locked(
             lambda: conn.execute(
                 """
-                INSERT INTO activities_new(shift_id, start_ts, end_ts, code, label, notes, tool, hole_id, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?);
+                INSERT INTO activities_new(id, shift_id, start_ts, end_ts, code, label, notes, tool, hole_id, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?);
                 """,
                 (
-                    d.get("shift_id"),
+                    d.get("id"),
+                    shift_id_val,
                     start_val,
                     end_val,
                     code_val,
@@ -291,10 +325,14 @@ def _sqlite_migrate_activities_to_new(conn: sqlite3.Connection) -> None:
             )
         )
 
-    _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities;"))
-    _retry_locked(lambda: conn.execute("ALTER TABLE activities_new RENAME TO activities;"))
-    _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);"))
-    _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_hole_id ON activities(hole_id);"))
+    conn.execute("PRAGMA foreign_keys=OFF;")
+    try:
+        _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS activities;"))
+        _retry_locked(lambda: conn.execute("ALTER TABLE activities_new RENAME TO activities;"))
+        _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);"))
+        _retry_locked(lambda: conn.execute("CREATE INDEX IF NOT EXISTS idx_acts_hole_id ON activities(hole_id);"))
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON;")
 
 
 def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
@@ -380,14 +418,6 @@ def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
             hours = 12.0
         return hours
 
-    def parse_ts(val: Any) -> Optional[datetime]:
-        if val is None:
-            return None
-        try:
-            return datetime.fromisoformat(str(val))
-        except Exception:
-            return None
-
     def to_int_bool(val: Any) -> int:
         if val is None:
             return 0
@@ -397,8 +427,6 @@ def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
             return 1 if str(val).strip().lower() in {"true", "yes", "y", "1"} else 0
 
     canonical_by_id: Dict[int, Dict[str, Any]] = {}
-    keep_by_key: Dict[tuple[str, str], int] = {}
-    best_key: Dict[tuple[str, str], tuple[datetime, int]] = {}
 
     for r in rows:
         d = dict(r)
@@ -416,7 +444,7 @@ def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
             username = "UNKNOWN"
 
         shift_date = coerce_date(d.get("shift_date"))
-        client = clean(d.get("client")) or "Other"
+        client = clean(d.get("client")) or "FMG"
 
         site = clean(d.get("site"))
         site_other = clean(d.get("site_other"))
@@ -470,13 +498,6 @@ def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
             "updated_at": updated_at,
         }
         canonical_by_id[old_id] = canon
-
-        key = (shift_date, username)
-        ts = parse_ts(updated_at) or parse_ts(created_at) or datetime.min
-        sort_key = (ts, old_id)
-        if key not in best_key or sort_key > best_key[key]:
-            best_key[key] = sort_key
-            keep_by_key[key] = old_id
 
     conn.execute("PRAGMA foreign_keys=OFF;")
     try:
@@ -536,18 +557,12 @@ def _sqlite_migrate_shifts_to_new(conn: sqlite3.Connection) -> None:
             placeholders = ",".join(["?"] * len(insert_cols))
             insert_sql = f"INSERT INTO shifts_new({','.join(insert_cols)}) VALUES({placeholders});"
 
-            for keep_id in keep_by_key.values():
-                canon = canonical_by_id.get(keep_id)
+            for old_id in sorted(canonical_by_id):
+                canon = canonical_by_id.get(old_id)
                 if not canon:
                     continue
                 values = [canon.get(col) for col in insert_cols]
                 _retry_locked(lambda: conn.execute(insert_sql, values))
-
-            for old_id, canon in canonical_by_id.items():
-                keep_id = keep_by_key.get((canon["shift_date"], canon["username"]))
-                if keep_id is None or old_id == keep_id:
-                    continue
-                _retry_locked(lambda: conn.execute("UPDATE activities SET shift_id=? WHERE shift_id=?;", (keep_id, old_id)))
 
         _retry_locked(lambda: conn.execute("DROP TABLE IF EXISTS shifts;"))
         _retry_locked(lambda: conn.execute("ALTER TABLE shifts_new RENAME TO shifts;"))
@@ -574,6 +589,7 @@ def _init_sqlite() -> None:
         """
         CREATE TABLE IF NOT EXISTS holes(
           hole_id TEXT PRIMARY KEY,
+          hole_name TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -627,14 +643,32 @@ def _init_sqlite() -> None:
         """
     )
 
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_files(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          activity_id INTEGER NOT NULL,
+          file_name TEXT NOT NULL,
+          file_bytes BLOB NOT NULL,
+          file_size INTEGER NOT NULL,
+          checksum TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          uploaded_at TEXT NOT NULL,
+          uploaded_by TEXT,
+          FOREIGN KEY(activity_id) REFERENCES activities(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    _sqlite_ensure_hole_name_column(c)
     _sqlite_migrate_shifts_to_new(c)
     _sqlite_migrate_activities_to_new(c)
-    _sqlite_dedupe_shifts(c)
 
-    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_shifts_user_day ON shifts(shift_date, username);")
+    c.execute("DROP INDEX IF EXISTS uq_shifts_user_day;")
     c.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(username, shift_date);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_acts_shift_start ON activities(shift_id, start_ts);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_acts_hole_id ON activities(hole_id);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_activity_files_activity ON activity_files(activity_id);")
     c.commit()
     c.close()
 
@@ -655,6 +689,7 @@ def init_storage() -> None:
         s.sql(
             """
             CREATE TABLE IF NOT EXISTS PUMA_SHIFTS(
+              SHIFT_ID STRING,
               SHIFT_DATE DATE, USERNAME STRING,
               CLIENT STRING, SITE STRING, SITE_OTHER STRING, JOB_NUMBER STRING,
               VEHICLE_BARCODE STRING, VEHICLE_NAME STRING, VEHICLE_DESCRIPTION STRING, VEHICLE_MODEL STRING, VEHICLE_CATEGORY STRING,
@@ -669,16 +704,19 @@ def init_storage() -> None:
             """
             CREATE TABLE IF NOT EXISTS PUMA_HOLES(
               HOLE_ID STRING,
+              HOLE_NAME STRING,
               CREATED_AT TIMESTAMP_NTZ,
               UPDATED_AT TIMESTAMP_NTZ
             );
             """
         ).collect()
+        s.sql("ALTER TABLE PUMA_HOLES ADD COLUMN IF NOT EXISTS HOLE_NAME STRING;").collect()
 
         s.sql(
             """
             CREATE TABLE IF NOT EXISTS PUMA_ACTIVITIES(
               ID NUMBER AUTOINCREMENT,
+              SHIFT_ID STRING,
               SHIFT_DATE DATE, USERNAME STRING,
               START_TS TIMESTAMP_NTZ, END_TS TIMESTAMP_NTZ,
               CODE STRING, LABEL STRING, NOTES STRING, TOOL STRING, HOLE_ID STRING,
@@ -686,8 +724,53 @@ def init_storage() -> None:
             );
             """
         ).collect()
+        s.sql(
+            """
+            CREATE TABLE IF NOT EXISTS PUMA_ACTIVITY_FILES(
+              ID NUMBER AUTOINCREMENT,
+              ACTIVITY_ID NUMBER,
+              SHIFT_ID STRING,
+              FILE_NAME STRING,
+              FILE_BYTES BINARY,
+              FILE_SIZE NUMBER,
+              CHECKSUM STRING,
+              STATUS STRING,
+              UPLOADED_AT TIMESTAMP_NTZ,
+              UPLOADED_BY STRING
+            );
+            """
+        ).collect()
         try:
             s.sql("ALTER TABLE PUMA_ACTIVITIES ADD COLUMN HOLE_ID STRING;").collect()
+        except Exception:
+            pass
+        try:
+            s.sql("ALTER TABLE PUMA_SHIFTS ADD COLUMN SHIFT_ID STRING;").collect()
+        except Exception:
+            pass
+        try:
+            s.sql("ALTER TABLE PUMA_ACTIVITIES ADD COLUMN SHIFT_ID STRING;").collect()
+        except Exception:
+            pass
+        try:
+            s.sql("UPDATE PUMA_SHIFTS SET SHIFT_ID=UUID_STRING() WHERE SHIFT_ID IS NULL;").collect()
+        except Exception:
+            pass
+        try:
+            s.sql(
+                """
+                UPDATE PUMA_ACTIVITIES a
+                   SET SHIFT_ID = s.SHIFT_ID
+                  FROM (
+                    SELECT SHIFT_DATE, USERNAME, SHIFT_ID
+                      FROM PUMA_SHIFTS
+                     QUALIFY COUNT(*) OVER (PARTITION BY SHIFT_DATE, USERNAME) = 1
+                  ) s
+                 WHERE a.SHIFT_DATE = s.SHIFT_DATE
+                   AND a.USERNAME = s.USERNAME
+                   AND a.SHIFT_ID IS NULL;
+                """
+            ).collect()
         except Exception:
             pass
         return
@@ -763,6 +846,14 @@ def _sqlite_get_shift(conn: sqlite3.Connection, shift_date: str, username: str) 
     return dict(row) if row else None
 
 
+def _sqlite_get_shift_by_id(conn: sqlite3.Connection, shift_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        row = conn.execute("SELECT * FROM shifts WHERE id=?;", (int(shift_id),)).fetchone()
+    except Exception:
+        return None
+    return dict(row) if row else None
+
+
 def get_shift(shift_date: date | str, username: str) -> Optional[Dict[str, Any]]:
     dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
 
@@ -777,13 +868,82 @@ def get_shift(shift_date: date | str, username: str) -> Optional[Dict[str, Any]]
             return None
         r = rows[0].as_dict()
         r = {k.lower(): v for k, v in r.items()}
+        for fld in ("shift_date", "created_at", "updated_at"):
+            if isinstance(r.get(fld), datetime):
+                r[fld] = r[fld].isoformat(timespec="seconds")
+            elif isinstance(r.get(fld), date):
+                r[fld] = r[fld].isoformat()
         r["shift_date"] = dt_str
         return r
 
     conn = _sqlite_conn()
     row = _sqlite_get_shift(conn, dt_str, username)
     conn.close()
+    if row:
+        row["shift_id"] = row.get("id")
     return row
+
+
+def get_shift_by_id(shift_id: int | str) -> Optional[Dict[str, Any]]:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT * FROM PUMA_SHIFTS WHERE SHIFT_ID=? LIMIT 1",
+            params=[str(shift_id)],
+        ).collect()
+        if not rows:
+            return None
+        r = rows[0].as_dict()
+        r = {k.lower(): v for k, v in r.items()}
+        for fld in ("shift_date", "created_at", "updated_at"):
+            if isinstance(r.get(fld), datetime):
+                r[fld] = r[fld].isoformat(timespec="seconds")
+            elif isinstance(r.get(fld), date):
+                r[fld] = r[fld].isoformat()
+        return r
+
+    conn = _sqlite_conn()
+    row = _sqlite_get_shift_by_id(conn, int(shift_id))
+    conn.close()
+    if row:
+        row["shift_id"] = row.get("id")
+    return row
+
+
+def list_shifts(shift_date: date | str, username: str) -> List[Dict[str, Any]]:
+    dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT * FROM PUMA_SHIFTS WHERE SHIFT_DATE=? AND USERNAME=? ORDER BY SHIFT_START ASC, CREATED_AT ASC",
+            params=[dt_str, username],
+        ).collect()
+        out = []
+        for r in rows:
+            d = {k.lower(): v for k, v in r.as_dict().items()}
+            for fld in ("shift_date", "created_at", "updated_at"):
+                if isinstance(d.get(fld), datetime):
+                    d[fld] = d[fld].isoformat(timespec="seconds")
+                elif isinstance(d.get(fld), date):
+                    d[fld] = d[fld].isoformat()
+            out.append(d)
+        return out
+
+    conn = _sqlite_conn()
+    rows = conn.execute(
+        "SELECT * FROM shifts WHERE shift_date=? AND username=? ORDER BY shift_start ASC, id ASC;",
+        (dt_str, username),
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["shift_id"] = d.get("id")
+        out.append(d)
+    return out
 
 
 def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -793,53 +953,61 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Missing required field: {k}")
 
     dt_str = d.get("shift_date") if isinstance(d.get("shift_date"), str) else d.get("shift_date").isoformat()
+    shift_id = d.get("shift_id") or d.get("id")
 
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
+        if not shift_id:
+            shift_id = str(uuid.uuid4())
         ts = "CURRENT_TIMESTAMP()"
         mismatch = "TRUE" if bool(d.get("vehicle_location_mismatch")) else "FALSE"
         s.sql(
             """
             MERGE INTO PUMA_SHIFTS t
-            USING (SELECT TO_DATE(?) SHIFT_DATE, ? USERNAME) src
-            ON t.SHIFT_DATE = src.SHIFT_DATE AND t.USERNAME = src.USERNAME
+            USING (SELECT ? SHIFT_ID) src
+            ON t.SHIFT_ID = src.SHIFT_ID
             WHEN MATCHED THEN UPDATE SET
+              SHIFT_DATE=TO_DATE(?), USERNAME=?,
               CLIENT=?, SITE=?, SITE_OTHER=?, JOB_NUMBER=?,
               VEHICLE_BARCODE=?, VEHICLE_NAME=?, VEHICLE_DESCRIPTION=?, VEHICLE_MODEL=?, VEHICLE_CATEGORY=?,
               VEHICLE_LOCATION_EXPECTED=?, VEHICLE_LOCATION_ACTUAL=?, VEHICLE_LOCATION_MISMATCH=?,
               SHIFT_START=?, SHIFT_HOURS=?, SHIFT_NOTES=?, UPDATED_AT={ts}
             WHEN NOT MATCHED THEN INSERT(
-              SHIFT_DATE, USERNAME, CLIENT, SITE, SITE_OTHER, JOB_NUMBER,
+              SHIFT_ID, SHIFT_DATE, USERNAME, CLIENT, SITE, SITE_OTHER, JOB_NUMBER,
               VEHICLE_BARCODE, VEHICLE_NAME, VEHICLE_DESCRIPTION, VEHICLE_MODEL, VEHICLE_CATEGORY,
               VEHICLE_LOCATION_EXPECTED, VEHICLE_LOCATION_ACTUAL, VEHICLE_LOCATION_MISMATCH,
               SHIFT_START, SHIFT_HOURS, SHIFT_NOTES, CREATED_AT, UPDATED_AT
             ) VALUES(
-              TO_DATE(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {ts}, {ts}
+              ?, TO_DATE(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {ts}, {ts}
             );
             """.format(ts=ts),
             params=[
+                str(shift_id),
                 dt_str,
                 d.get("username"),
                 d.get("client"), d.get("site"), d.get("site_other"), d.get("job_number"),
                 d.get("vehicle_barcode"), d.get("vehicle_name"), d.get("vehicle_description"), d.get("vehicle_model"), d.get("vehicle_category"),
                 d.get("vehicle_location_expected"), d.get("vehicle_location_actual"), bool(d.get("vehicle_location_mismatch")),
                 d.get("shift_start"), float(d.get("shift_hours", 12)), d.get("shift_notes"),
+                str(shift_id),
                 dt_str,
-                d.get("username"), d.get("client"), d.get("site"), d.get("site_other"), d.get("job_number"),
+                d.get("username"),
+                d.get("client"), d.get("site"), d.get("site_other"), d.get("job_number"),
                 d.get("vehicle_barcode"), d.get("vehicle_name"), d.get("vehicle_description"), d.get("vehicle_model"), d.get("vehicle_category"),
                 d.get("vehicle_location_expected"), d.get("vehicle_location_actual"), bool(d.get("vehicle_location_mismatch")),
                 d.get("shift_start"), float(d.get("shift_hours", 12)), d.get("shift_notes"),
             ],
         ).collect()
-        out = get_shift(dt_str, d.get("username"))
+        out = get_shift_by_id(shift_id)
         assert out is not None
         return out
 
     conn = _sqlite_conn()
     col_set = set(_sqlite_cols(conn, "shifts"))
-    existing = _sqlite_get_shift(conn, dt_str, d.get("username"))
+    existing = _sqlite_get_shift_by_id(conn, int(shift_id)) if shift_id else None
     ts = _now()
+    new_id: Optional[int] = None
 
     payload = {
         "shift_date": dt_str,
@@ -900,14 +1068,13 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
         insert_cols = ",".join(payload.keys())
         insert_vals = ":" + ",:".join(payload.keys())
         try:
-            _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({insert_cols}) VALUES({insert_vals});", payload))
+            new_id = _retry_locked(lambda: conn.execute(f"INSERT INTO shifts({insert_cols}) VALUES({insert_vals});", payload).lastrowid)
         except sqlite3.IntegrityError:
-            # If an unexpected constraint trips (e.g., legacy unique indexes), dedupe and try again.
-            _sqlite_dedupe_shifts(conn)
+            # If an unexpected constraint trips, try a fallback insert or update.
             col_list = list(payload.keys())
             placeholders = ",".join(["?"] * len(col_list))
             try:
-                _retry_locked(lambda: conn.execute(f"INSERT OR REPLACE INTO shifts({insert_cols}) VALUES({placeholders});", tuple(payload[c] for c in col_list)))
+                new_id = _retry_locked(lambda: conn.execute(f"INSERT OR REPLACE INTO shifts({insert_cols}) VALUES({placeholders});", tuple(payload[c] for c in col_list)).lastrowid)
             except sqlite3.IntegrityError:
                 # Final fallback: attempt update in place
                 if "username" in col_set:
@@ -927,26 +1094,46 @@ def upsert_shift(d: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
     conn.commit()
-    out = _sqlite_get_shift(conn, dt_str, d.get("username"))
+    out = _sqlite_get_shift_by_id(conn, int(shift_id)) if shift_id else None
+    if out is None:
+        try:
+            out = _sqlite_get_shift_by_id(conn, int(new_id)) if new_id else None
+        except Exception:
+            out = None
+    if out is None:
+        out = _sqlite_get_shift(conn, dt_str, d.get("username"))
     conn.close()
     if out is None:
         # Fallback return payload to avoid crashing if retrieval fails unexpectedly
         payload["id"] = payload.get("id")
         payload["created_at"] = payload.get("created_at", ts)
         return payload
+    out["shift_id"] = out.get("id")
     return out
 
 
-def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any]]:
+def list_activities(shift_date: str | date, username: str, shift_id: int | str | None = None) -> List[Dict[str, Any]]:
     dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
 
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        rows = s.sql(
-            "SELECT * FROM PUMA_ACTIVITIES WHERE SHIFT_DATE=TO_DATE(?) AND USERNAME=? ORDER BY START_TS ASC, ID ASC",
-            params=[dt_str, username],
-        ).collect()
+        if shift_id:
+            rows = s.sql(
+                "SELECT a.*, h.HOLE_NAME AS HOLE_NAME "
+                "FROM PUMA_ACTIVITIES a "
+                "LEFT JOIN PUMA_HOLES h ON a.HOLE_ID = h.HOLE_ID "
+                "WHERE a.SHIFT_ID=? ORDER BY a.START_TS ASC, a.ID ASC",
+                params=[str(shift_id)],
+            ).collect()
+        else:
+            rows = s.sql(
+                "SELECT a.*, h.HOLE_NAME AS HOLE_NAME "
+                "FROM PUMA_ACTIVITIES a "
+                "LEFT JOIN PUMA_HOLES h ON a.HOLE_ID = h.HOLE_ID "
+                "WHERE a.SHIFT_DATE=TO_DATE(?) AND a.USERNAME=? ORDER BY a.START_TS ASC, a.ID ASC",
+                params=[dt_str, username],
+            ).collect()
         out = []
         for r in rows:
             d = {k.lower(): v for k, v in r.as_dict().items()}
@@ -957,7 +1144,11 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
         return out
 
     conn = _sqlite_conn()
-    sh = _sqlite_get_shift(conn, dt_str, username)
+    sh = None
+    if shift_id is not None:
+        sh = _sqlite_get_shift_by_id(conn, int(shift_id))
+    else:
+        sh = _sqlite_get_shift(conn, dt_str, username)
     if not sh:
         conn.close()
         return []
@@ -965,7 +1156,10 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
     schema = _sqlite_activity_schema(conn)
     if schema == "new":
         rows = conn.execute(
-            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_ts ASC, id ASC;",
+            "SELECT a.*, h.hole_name AS hole_name "
+            "FROM activities a "
+            "LEFT JOIN holes h ON a.hole_id = h.hole_id "
+            "WHERE a.shift_id=? ORDER BY a.start_ts ASC, a.id ASC;",
             (sh["id"],),
         ).fetchall()
         out = []
@@ -983,10 +1177,14 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
             if not d.get("tool"):
                 d["tool"] = d.get("tools_csv") or d.get("tool_ref")
             d.setdefault("hole_id", d.get("hole_id"))
+            d.setdefault("hole_name", d.get("hole_name"))
             out.append(d)
     else:
         rows = conn.execute(
-            "SELECT * FROM activities WHERE shift_id=? ORDER BY start_time ASC, id ASC;",
+            "SELECT a.*, h.hole_name AS hole_name "
+            "FROM activities a "
+            "LEFT JOIN holes h ON a.hole_id = h.hole_id "
+            "WHERE a.shift_id=? ORDER BY a.start_time ASC, a.id ASC;",
             (sh["id"],),
         ).fetchall()
         out = []
@@ -1002,18 +1200,125 @@ def list_activities(shift_date: str | date, username: str) -> List[Dict[str, Any
                 "notes": d.get("notes") or d.get("comments") or "",
                 "tool": d.get("tool") or d.get("tool_ref") or d.get("tools_csv") or "",
                 "hole_id": d.get("hole_id"),
+                "hole_name": d.get("hole_name"),
             })
     conn.close()
     return out
 
 
-def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> None:
+def create_hole(hole_name: Optional[str]) -> str:
+    hole_id = _generate_hole_id()
+    ts = _now()
+    hole_name_val = hole_name.strip() if isinstance(hole_name, str) and hole_name.strip() else None
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            """
+            INSERT INTO PUMA_HOLES(HOLE_ID, HOLE_NAME, CREATED_AT, UPDATED_AT)
+            VALUES(?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+            """,
+            params=[hole_id, hole_name_val],
+        ).collect()
+        return hole_id
+
+    conn = _sqlite_conn()
+    _retry_locked(
+        lambda: conn.execute(
+            """
+            INSERT INTO holes(hole_id, hole_name, created_at, updated_at)
+            VALUES(?,?,?,?);
+            """,
+            (hole_id, hole_name_val, ts, ts),
+        )
+    )
+    conn.commit()
+    conn.close()
+    return hole_id
+
+
+def update_hole_name(hole_id: str, hole_name: Optional[str]) -> None:
+    if not hole_id:
+        return
+    hole_name_val = hole_name.strip() if isinstance(hole_name, str) and hole_name.strip() else None
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            "UPDATE PUMA_HOLES SET HOLE_NAME=?, UPDATED_AT=CURRENT_TIMESTAMP() WHERE HOLE_ID=?;",
+            params=[hole_name_val, hole_id],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    _retry_locked(lambda: conn.execute("UPDATE holes SET hole_name=?, updated_at=? WHERE hole_id=?;", (hole_name_val, _now(), hole_id)))
+    conn.commit()
+    conn.close()
+
+
+def get_hole(hole_id: str) -> Optional[Dict[str, Any]]:
+    if not hole_id:
+        return None
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT HOLE_ID, HOLE_NAME, CREATED_AT, UPDATED_AT FROM PUMA_HOLES WHERE HOLE_ID=? LIMIT 1",
+            params=[hole_id],
+        ).collect()
+        if not rows:
+            return None
+        d = {k.lower(): v for k, v in rows[0].as_dict().items()}
+        for fld in ("created_at", "updated_at"):
+            if isinstance(d.get(fld), (datetime, date)):
+                d[fld] = d[fld].isoformat(timespec="seconds")
+        return d
+
+    conn = _sqlite_conn()
+    try:
+        row = conn.execute(
+            "SELECT hole_id, hole_name, created_at, updated_at FROM holes WHERE hole_id=? LIMIT 1;",
+            (hole_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_holes() -> List[Dict[str, Any]]:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT HOLE_ID, HOLE_NAME, CREATED_AT, UPDATED_AT FROM PUMA_HOLES ORDER BY CREATED_AT DESC, HOLE_ID ASC"
+        ).collect()
+        out = []
+        for r in rows:
+            d = {k.lower(): v for k, v in r.as_dict().items()}
+            for fld in ("created_at", "updated_at"):
+                if isinstance(d.get(fld), (datetime, date)):
+                    d[fld] = d[fld].isoformat(timespec="seconds")
+            out.append(d)
+        return out
+
+    conn = _sqlite_conn()
+    rows = conn.execute(
+        "SELECT hole_id, hole_name, created_at, updated_at FROM holes ORDER BY created_at DESC, hole_id ASC;"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_activity(shift_date: str | date, username: str, a: Dict[str, Any], shift_id: int | str | None = None) -> None:
     # Normalize required fields early and guarantee non-NULL start/end for legacy schemas.
     start_val = a.get("start_ts") or a.get("start_time")
     end_val = a.get("end_ts") or a.get("end_time") or start_val
     code_val = a.get("code")
     label_val = a.get("label")
     hole_id_val = _normalize_hole_id(a.get("hole_id"))
+    hole_name_val = a.get("hole_name")
     if code_val == "LOG" and not hole_id_val:
         hole_id_val = _generate_hole_id()
 
@@ -1026,26 +1331,32 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        _sf_ensure_hole(s, hole_id_val)
+        if not shift_id:
+            shifts = list_shifts(dt_str, username)
+            if len(shifts) == 1:
+                shift_id = shifts[0].get("shift_id")
+            else:
+                raise ValueError("Shift ID required when multiple shifts exist.")
+        _sf_ensure_hole(s, hole_id_val, hole_name_val)
         s.sql(
             """
             INSERT INTO PUMA_ACTIVITIES(
-              SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, HOLE_ID, CREATED_AT, UPDATED_AT
-            ) VALUES(TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+              SHIFT_ID, SHIFT_DATE, USERNAME, START_TS, END_TS, CODE, LABEL, NOTES, TOOL, HOLE_ID, CREATED_AT, UPDATED_AT
+            ) VALUES(?, TO_DATE(?), ?, TO_TIMESTAMP_NTZ(?), TO_TIMESTAMP_NTZ(?), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
             """,
-            params=[dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val],
+            params=[str(shift_id) if shift_id else None, dt_str, username, start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val],
         ).collect()
         return
 
     conn = _sqlite_conn()
-    sh = _sqlite_get_shift(conn, dt_str, username)
+    sh = _sqlite_get_shift_by_id(conn, int(shift_id)) if shift_id is not None else _sqlite_get_shift(conn, dt_str, username)
     if not sh:
         conn.close()
         raise ValueError("Shift does not exist yet.")
 
     ts = _now()
     if hole_id_val:
-        _sqlite_upsert_hole(conn, hole_id_val, ts)
+        _sqlite_upsert_hole(conn, hole_id_val, ts, hole_name_val)
     cols = set(_sqlite_cols(conn, "activities"))
     # Populate both new and legacy columns when present to avoid NOT NULL conflicts on hybrid schemas.
     ordered_fields = [
@@ -1100,20 +1411,39 @@ def add_activity(shift_date: str | date, username: str, a: Dict[str, Any]) -> No
     conn.close()
 
 
-def delete_activity(shift_date: str | date, username: str, activity_id: int) -> None:
+def delete_activity(shift_date: str | date, username: str, activity_id: int, shift_id: int | str | None = None) -> None:
     dt_str = shift_date.isoformat() if isinstance(shift_date, date) else str(shift_date)
 
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        s.sql(
-            "DELETE FROM PUMA_ACTIVITIES WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;",
-            params=[int(activity_id), dt_str, username],
-        ).collect()
+        if not shift_id:
+            shifts = list_shifts(dt_str, username)
+            if len(shifts) == 1:
+                shift_id = shifts[0].get("shift_id")
+            else:
+                raise ValueError("Shift ID required when multiple shifts exist.")
+        if shift_id:
+            s.sql(
+                "DELETE FROM PUMA_ACTIVITIES WHERE ID=? AND SHIFT_ID=?;",
+                params=[int(activity_id), str(shift_id)],
+            ).collect()
+        else:
+            s.sql(
+                "DELETE FROM PUMA_ACTIVITIES WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;",
+                params=[int(activity_id), dt_str, username],
+            ).collect()
+        try:
+            s.sql(
+                "DELETE FROM PUMA_ACTIVITY_FILES WHERE ACTIVITY_ID=?;",
+                params=[int(activity_id)],
+            ).collect()
+        except Exception:
+            pass
         return
 
     conn = _sqlite_conn()
-    sh = _sqlite_get_shift(conn, dt_str, username)
+    sh = _sqlite_get_shift_by_id(conn, int(shift_id)) if shift_id is not None else _sqlite_get_shift(conn, dt_str, username)
     if not sh:
         conn.close()
         return
@@ -1122,12 +1452,13 @@ def delete_activity(shift_date: str | date, username: str, activity_id: int) -> 
     conn.close()
 
 
-def update_activity(shift_date: str | date, username: str, activity_id: int, a: Dict[str, Any]) -> None:
+def update_activity(shift_date: str | date, username: str, activity_id: int, a: Dict[str, Any], shift_id: int | str | None = None) -> None:
     start_val = a.get("start_ts") or a.get("start_time")
     end_val = a.get("end_ts") or a.get("end_time") or start_val
     code_val = a.get("code")
     label_val = a.get("label")
     hole_id_val = _normalize_hole_id(a.get("hole_id"))
+    hole_name_val = a.get("hole_name")
     if code_val == "LOG" and not hole_id_val:
         hole_id_val = _generate_hole_id()
 
@@ -1140,20 +1471,37 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
     if backend() == "snowflake":
         s = _try_get_sf_session()
         assert s is not None
-        _sf_ensure_hole(s, hole_id_val)
-        s.sql(
-            """
-            UPDATE PUMA_ACTIVITIES
-              SET START_TS=TO_TIMESTAMP_NTZ(?), END_TS=TO_TIMESTAMP_NTZ(?),
-                  CODE=?, LABEL=?, NOTES=?, TOOL=?, HOLE_ID=?, UPDATED_AT=CURRENT_TIMESTAMP()
-            WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;
-            """,
-            params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val, int(activity_id), dt_str, username],
-        ).collect()
+        if not shift_id:
+            shifts = list_shifts(dt_str, username)
+            if len(shifts) == 1:
+                shift_id = shifts[0].get("shift_id")
+            else:
+                raise ValueError("Shift ID required when multiple shifts exist.")
+        _sf_ensure_hole(s, hole_id_val, hole_name_val)
+        if shift_id:
+            s.sql(
+                """
+                UPDATE PUMA_ACTIVITIES
+                  SET START_TS=TO_TIMESTAMP_NTZ(?), END_TS=TO_TIMESTAMP_NTZ(?),
+                      CODE=?, LABEL=?, NOTES=?, TOOL=?, HOLE_ID=?, UPDATED_AT=CURRENT_TIMESTAMP()
+                WHERE ID=? AND SHIFT_ID=?;
+                """,
+                params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val, int(activity_id), str(shift_id)],
+            ).collect()
+        else:
+            s.sql(
+                """
+                UPDATE PUMA_ACTIVITIES
+                  SET START_TS=TO_TIMESTAMP_NTZ(?), END_TS=TO_TIMESTAMP_NTZ(?),
+                      CODE=?, LABEL=?, NOTES=?, TOOL=?, HOLE_ID=?, UPDATED_AT=CURRENT_TIMESTAMP()
+                WHERE ID=? AND SHIFT_DATE=TO_DATE(?) AND USERNAME=?;
+                """,
+                params=[start_val, end_val, code_val, label_val, a.get("notes"), a.get("tool"), hole_id_val, int(activity_id), dt_str, username],
+            ).collect()
         return
 
     conn = _sqlite_conn()
-    sh = _sqlite_get_shift(conn, dt_str, username)
+    sh = _sqlite_get_shift_by_id(conn, int(shift_id)) if shift_id is not None else _sqlite_get_shift(conn, dt_str, username)
     if not sh:
         conn.close()
         raise ValueError("Shift does not exist yet.")
@@ -1161,7 +1509,7 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
     schema = _sqlite_activity_schema(conn)
     ts = _now()
     if hole_id_val:
-        _sqlite_upsert_hole(conn, hole_id_val, ts)
+        _sqlite_upsert_hole(conn, hole_id_val, ts, hole_name_val)
     if schema == "new":
         _retry_locked(
             lambda: conn.execute(
@@ -1184,5 +1532,246 @@ def update_activity(shift_date: str | date, username: str, activity_id: int, a: 
                 (start_val, end_val, code_val, label_val, a.get("tool"), a.get("notes"), hole_id_val, ts, int(activity_id), sh["id"]),
             )
         )
+    conn.commit()
+    conn.close()
+
+
+def list_activity_files(activity_id: int | str) -> List[Dict[str, Any]]:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT ID, ACTIVITY_ID, SHIFT_ID, FILE_NAME, FILE_SIZE, CHECKSUM, STATUS, UPLOADED_AT, UPLOADED_BY "
+            "FROM PUMA_ACTIVITY_FILES WHERE ACTIVITY_ID=? ORDER BY UPLOADED_AT ASC, ID ASC",
+            params=[int(activity_id)],
+        ).collect()
+        out = []
+        for r in rows:
+            d = {k.lower(): v for k, v in r.as_dict().items()}
+            if isinstance(d.get("uploaded_at"), (datetime, date)):
+                d["uploaded_at"] = d["uploaded_at"].isoformat(timespec="seconds")
+            out.append(d)
+        return out
+
+    init_storage()
+    conn = _sqlite_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, activity_id, file_name, file_size, checksum, status, uploaded_at, uploaded_by
+              FROM activity_files
+             WHERE activity_id=?
+             ORDER BY uploaded_at ASC, id ASC;
+            """,
+            (int(activity_id),),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: activity_files" not in str(exc).lower():
+            conn.close()
+            raise
+        conn.close()
+        init_storage()
+        conn = _sqlite_conn()
+        rows = conn.execute(
+            """
+            SELECT id, activity_id, file_name, file_size, checksum, status, uploaded_at, uploaded_by
+              FROM activity_files
+             WHERE activity_id=?
+             ORDER BY uploaded_at ASC, id ASC;
+            """,
+            (int(activity_id),),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_activity_file_bytes(file_id: int | str) -> bytes | None:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT FILE_BYTES FROM PUMA_ACTIVITY_FILES WHERE ID=? LIMIT 1",
+            params=[int(file_id)],
+        ).collect()
+        if not rows:
+            return None
+        data = rows[0].as_dict().get("FILE_BYTES")
+        if data is None:
+            return None
+        if isinstance(data, bytearray):
+            return bytes(data)
+        if isinstance(data, memoryview):
+            return data.tobytes()
+        if isinstance(data, bytes):
+            return data
+        try:
+            return bytes(data)
+        except Exception:
+            return None
+
+    init_storage()
+    conn = _sqlite_conn()
+    try:
+        row = conn.execute(
+            "SELECT file_bytes FROM activity_files WHERE id=?;",
+            (int(file_id),),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: activity_files" not in str(exc).lower():
+            conn.close()
+            raise
+        conn.close()
+        init_storage()
+        conn = _sqlite_conn()
+        row = conn.execute(
+            "SELECT file_bytes FROM activity_files WHERE id=?;",
+            (int(file_id),),
+        ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0]
+
+
+def _activity_is_log(activity_id: int | str) -> bool:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        rows = s.sql(
+            "SELECT CODE FROM PUMA_ACTIVITIES WHERE ID=? LIMIT 1",
+            params=[int(activity_id)],
+        ).collect()
+        if not rows:
+            return False
+        return str(rows[0].as_dict().get("CODE") or "").upper() == "LOG"
+
+    conn = _sqlite_conn()
+    row = conn.execute("SELECT code FROM activities WHERE id=? LIMIT 1;", (int(activity_id),)).fetchone()
+    conn.close()
+    if not row:
+        return False
+    return str(row[0] or "").upper() == "LOG"
+
+
+def add_activity_file(
+    activity_id: int | str,
+    username: str,
+    file_name: str,
+    file_bytes: bytes,
+    shift_id: int | str | None = None,
+    status: str = "pending",
+    checksum: str | None = None,
+) -> None:
+    if not file_name:
+        raise ValueError("Missing file name.")
+    if not file_bytes:
+        raise ValueError("File is empty.")
+    if not _activity_is_log(activity_id):
+        raise ValueError("Files can only be attached to LOG activities.")
+    if not checksum:
+        checksum = _sha256_bytes(file_bytes)
+
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            """
+            INSERT INTO PUMA_ACTIVITY_FILES(
+              ACTIVITY_ID, SHIFT_ID, FILE_NAME, FILE_BYTES, FILE_SIZE, CHECKSUM, STATUS, UPLOADED_AT, UPLOADED_BY
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(), ?);
+            """,
+            params=[
+                int(activity_id),
+                str(shift_id) if shift_id is not None else None,
+                file_name,
+                file_bytes,
+                len(file_bytes),
+                checksum,
+                status,
+                username,
+            ],
+        ).collect()
+        return
+
+    init_storage()
+    conn = _sqlite_conn()
+    _retry_locked(
+        lambda: conn.execute(
+            """
+            INSERT INTO activity_files(activity_id, file_name, file_bytes, file_size, checksum, status, uploaded_at, uploaded_by)
+            VALUES(?,?,?,?,?,?,?,?);
+            """,
+            (int(activity_id), file_name, file_bytes, len(file_bytes), checksum, status, _now(), username),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+def finalize_activity_files(activity_id: int | str) -> None:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            "UPDATE PUMA_ACTIVITY_FILES SET STATUS='active' WHERE ACTIVITY_ID=? AND STATUS='pending';",
+            params=[int(activity_id)],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    _retry_locked(
+        lambda: conn.execute(
+            "UPDATE activity_files SET status='active' WHERE activity_id=? AND status='pending';",
+            (int(activity_id),),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_activity_file(file_id: int | str) -> None:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            "DELETE FROM PUMA_ACTIVITY_FILES WHERE ID=? AND STATUS='pending';",
+            params=[int(file_id)],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    _retry_locked(lambda: conn.execute("DELETE FROM activity_files WHERE id=? AND status='pending';", (int(file_id),)))
+    conn.commit()
+    conn.close()
+
+
+def mark_activity_file_redundant(file_id: int | str) -> None:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            "UPDATE PUMA_ACTIVITY_FILES SET STATUS='redundant' WHERE ID=? AND STATUS='active';",
+            params=[int(file_id)],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    _retry_locked(lambda: conn.execute("UPDATE activity_files SET status='redundant' WHERE id=? AND status='active';", (int(file_id),)))
+    conn.commit()
+    conn.close()
+
+
+def mark_activity_file_active(file_id: int | str) -> None:
+    if backend() == "snowflake":
+        s = _try_get_sf_session()
+        assert s is not None
+        s.sql(
+            "UPDATE PUMA_ACTIVITY_FILES SET STATUS='active' WHERE ID=? AND STATUS='redundant';",
+            params=[int(file_id)],
+        ).collect()
+        return
+
+    conn = _sqlite_conn()
+    _retry_locked(lambda: conn.execute("UPDATE activity_files SET status='active' WHERE id=? AND status='redundant';", (int(file_id),)))
     conn.commit()
     conn.close()

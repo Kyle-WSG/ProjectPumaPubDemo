@@ -139,7 +139,7 @@ def fill_shift_defaults(sh: Dict[str, Any] | None, vehicles: Dict[str, Dict[str,
             updated[key] = val
             changed = True
 
-    ensure("client", "Other")
+    ensure("client", "FMG")
     ensure("site", site_options[0] if site_options else "Other")
     if updated.get("site") in {"Other", "Other (manual)"} and not (updated.get("site_other") or "").strip():
         ensure("site_other", "Other")
@@ -176,8 +176,78 @@ def time_options(shift_date: date_cls, shift_start: str, shift_hours: float, ste
     return opts
 
 
-def format_time(dt: datetime) -> str:
-    return dt.strftime("%H:%M")
+DATETIME_FMT = "%d/%m/%Y at %H:%M"
+
+
+def format_dt(dt: datetime) -> str:
+    return dt.strftime(DATETIME_FMT)
+
+
+def format_dt_value(val: Any) -> str:
+    if val is None:
+        return "—"
+    if isinstance(val, datetime):
+        return format_dt(val)
+    if isinstance(val, date_cls):
+        return format_dt(datetime(val.year, val.month, val.day))
+    if isinstance(val, str):
+        try:
+            return format_dt(datetime.fromisoformat(val))
+        except Exception:
+            try:
+                d = date_cls.fromisoformat(val)
+                return format_dt(datetime(d.year, d.month, d.day))
+            except Exception:
+                return val
+    return str(val)
+
+
+def format_time(dt: datetime, base_date: date_cls | None = None) -> str:
+    return format_dt(dt)
+
+
+def activity_title(act: Dict[str, Any], sh: Dict[str, Any]) -> str:
+    site_display = sh.get("site_other") if sh.get("site") == "Other" and sh.get("site_other") else sh.get("site")
+    site_display = site_display or "—"
+    tools_list = [t.strip() for t in str(act.get("tool") or "").split(",") if t.strip()]
+    tools_str = ", ".join(tools_list) if tools_list else "—"
+    hole_name = format_hole_display(act.get("hole_name"), act.get("hole_id"))
+    code = str(act.get("code") or "").upper()
+    if code == "LOG":
+        return f"Logging — Location: {site_display} · Hole name: {hole_name} · Tools: {tools_str}"
+    label = act.get("label") or code or "Activity"
+    return f"{label} — Location: {site_display} · Tools: {tools_str}"
+
+
+def format_hole_display(hole_name: Any, hole_id: Any = None) -> str:
+    name = str(hole_name).strip() if hole_name is not None else ""
+    if name:
+        return name
+    if hole_id:
+        short_id = str(hole_id)[:8]
+        return f"Unnamed hole ({short_id})"
+    return "Unnamed hole"
+
+
+def hole_option_label(hole: Dict[str, Any]) -> str:
+    name = str(hole.get("hole_name") or "").strip() or "Unnamed hole"
+    hole_id = hole.get("hole_id")
+    short_id = str(hole_id)[:8] if hole_id else "—"
+    created = format_dt_value(hole.get("created_at")) if hole.get("created_at") else ""
+    label = f"{name} — {short_id}"
+    if created:
+        label = f"{label} · {created}"
+    return label
+
+
+def format_bytes(size: int) -> str:
+    units = ["B", "KB", "MB", "GB"]
+    val = float(size)
+    for unit in units:
+        if val < 1024 or unit == units[-1]:
+            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} {unit}"
+        val /= 1024
+    return f"{val:.1f} GB"
 
 
 def iso(d: date_cls) -> str:
@@ -216,7 +286,7 @@ def well_report_excel_bytes(report: Dict[str, Any], hangups: List[Dict[str, Any]
         "Elevation": report.get("elevation"),
         "Drill Depth": report.get("drill_depth"),
         "Log Depth": report.get("log_depth"),
-        "Hole ID": report.get("hole_id"),
+        "Hole name": report.get("hole_name"),
         "IN DEVELOPMENT": "IN DEVELOPMENT",
     }]
     dgps_rows = [{
@@ -253,7 +323,7 @@ def demo_well_report_defaults(act: Dict[str, Any]) -> Dict[str, Any]:
         "elevation": round(random.uniform(300, 550), 1),
         "drill_depth": depth_to + 20,
         "log_depth": depth_to,
-        "hole_id": act.get("hole_id") or f"H-{random.randint(100, 999)}",
+        "hole_name": act.get("hole_name") or "Unnamed hole",
         "comments": "Auto-generated for demo purposes. Adjust before finalising.",
         "inj_development": "IN DEVELOPMENT",
         "dgps_easting": random.randint(700000, 799999),
@@ -347,7 +417,7 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]], highlig
         x_end="End",
         y="Lane",
         color="Code",
-        hover_data={"Label": True, "Start": True, "End": True},
+        hover_data={"Label": True, "Start": "|%d/%m/%Y at %H:%M", "End": "|%d/%m/%Y at %H:%M"},
         text="Label",
         color_discrete_map=color_map,
     )
@@ -359,7 +429,7 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]], highlig
         showlegend=True,
         hovermode="x",
     )
-    fig.update_xaxes(range=[start, end], dtick=60 * 60 * 1000, tickformat="%H:%M", showgrid=True, gridcolor="rgba(255,255,255,0.10)", griddash="dot")
+    fig.update_xaxes(range=[start, end], dtick=60 * 60 * 1000, tickformat="%d/%m/%Y at %H:%M", showgrid=True, gridcolor="rgba(255,255,255,0.10)", griddash="dot")
     fig.update_traces(textposition="inside", insidetextanchor="middle", textfont_size=11, marker_line_width=0)
     for tr in fig.data:
         if tr.name == "__shift__":
@@ -368,7 +438,7 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]], highlig
             tr.marker.line.width = 0
         if tr.name == "__editing__":
             tr.name = "Editing"
-    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+    st.plotly_chart(fig, width="stretch")
 
 
 def style(theme: str):
@@ -446,6 +516,18 @@ def style(theme: str):
           .block-container .stDownloadButton>button:hover {{
             box-shadow: 0 14px 30px rgba(38,169,133,0.32);
           }}
+          .block-container button[title*="Delete activity"] {{
+            background: linear-gradient(135deg, #b45309, #f59e0b);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.10);
+            box-shadow: 0 10px 24px rgba(245,158,11,0.28);
+          }}
+          .block-container button[title*="Remove pending file"] {{
+            background: linear-gradient(135deg, #b45309, #f59e0b);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.10);
+            box-shadow: 0 10px 24px rgba(245,158,11,0.28);
+          }}
           .tight-row {{display:flex; gap:10px; flex-wrap:wrap;}}
           .chip {{padding: 6px 10px; border-radius: 10px; border: 1px solid var(--wsg-border); font-size: 0.9rem; color: var(--wsg-muted);}}
           .icon-btn button {{background: transparent !important; border: 1px solid var(--wsg-border); color: var(--wsg-muted);}}
@@ -458,18 +540,20 @@ def style(theme: str):
     )
 
 
-@st.cache_resource
 def boot(vehicles: Dict[str, Dict[str, str]]):
+    if st.session_state.get("_boot_ready"):
+        return True
     storage.init_storage()
     storage.upsert_reference_data(list(vehicles.values()))
+    st.session_state["_boot_ready"] = True
     return True
 
 
 def login(users: List[str]):
     st.markdown("<div class='title-lg'>Project Puma</div>", unsafe_allow_html=True)
-    st.caption("Wireline daily diary — one shift per user per day.")
+    st.caption("Wireline daily diary — log shifts and activities.")
     user = st.selectbox("User", users)
-    if st.button("Enter", type="primary", use_container_width=True):
+    if st.button("Enter", type="primary", width="stretch"):
         st.session_state.username = user
         st.session_state.shift_date = iso(date_cls.today())
         st.session_state.view = "dd"
@@ -478,24 +562,34 @@ def login(users: List[str]):
 
 def topbar():
     d = datetime.fromisoformat(st.session_state.shift_date).date()
+    def set_shift_date(new_date: date_cls):
+        st.session_state.shift_date = iso(new_date)
+        st.session_state.view = "dd"
+        st.session_state.active_shift_id = None
+        st.session_state.edit_activity_id = None
+        st.session_state.well_report_activity_id = None
+        st.session_state.latest_shift = None
     with st.container(border=True):
         c_user, c_prev, c_date, c_next, c_today, c_logout = st.columns([1.6, 0.7, 3.0, 0.7, 1.0, 1.1], vertical_alignment="center")
         with c_user:
             st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{st.session_state.username}</div>", unsafe_allow_html=True)
         with c_prev:
-            if st.button("◀", use_container_width=True):
-                st.session_state.shift_date = iso(d - timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+            if st.button("◀", width="stretch"):
+                set_shift_date(d - timedelta(days=1))
+                st.rerun()
         with c_date:
-            st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{d.strftime('%a %d %b %Y')}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{format_dt_value(d)}</div>", unsafe_allow_html=True)
         with c_next:
-            if st.button("▶", use_container_width=True):
-                st.session_state.shift_date = iso(d + timedelta(days=1)); st.session_state.view = "dd"; st.rerun()
+            if st.button("▶", width="stretch"):
+                set_shift_date(d + timedelta(days=1))
+                st.rerun()
         with c_today:
-            if st.button("Today", use_container_width=True):
-                st.session_state.shift_date = iso(date_cls.today()); st.session_state.view = "dd"; st.rerun()
+            if st.button("Today", width="stretch"):
+                set_shift_date(date_cls.today())
+                st.rerun()
         with c_logout:
-            if st.button("Log out", use_container_width=True):
-                for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso"]:
+            if st.button("Log out", width="stretch"):
+                for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso", "active_shift_id", "latest_shift", "well_report_activity_id"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
@@ -505,12 +599,14 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
     d = st.session_state.shift_date
     username = st.session_state.username
     missing = missing or []
+    shift_id = existing.get("shift_id") or existing.get("id")
 
     with st.form(form_key):
         st.markdown("### Shift details")
         c1, c2 = st.columns([1.1, 1.1])
         with c1:
-            client = st.selectbox("Client *", CLIENTS, index=(CLIENTS.index(existing.get("client", "Other")) if existing.get("client") in CLIENTS else CLIENTS.index("Other")))
+            default_client = existing.get("client") if existing.get("client") in CLIENTS else ("FMG" if "FMG" in CLIENTS else CLIENTS[0])
+            client = st.selectbox("Client *", CLIENTS, index=(CLIENTS.index(default_client) if default_client in CLIENTS else 0))
             if "client" in missing:
                 st.caption(":red[Required]")
         with c2:
@@ -528,14 +624,34 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
                 st.caption(":red[Required]")
 
         st.markdown("#### Vehicle")
-        options = ["__OTHER__"] + sorted(vehicles.keys(), key=lambda x: (int(x) if str(x).isdigit() else 999999, x)) if vehicles else ["__OTHER__"]
-        fmt = lambda bc: "Other / not listed" if bc == "__OTHER__" else f"{bc} — {vehicles[bc].get('name','')} ({vehicles[bc].get('category','')})"
-        current_bc = existing.get("vehicle_barcode") or (options[1] if len(options) > 1 else "__OTHER__")
+        choose_key = "__CHOOSE__"
+        options = ([choose_key] + sorted(vehicles.keys(), key=lambda x: (int(x) if str(x).isdigit() else 999999, x)) + ["__OTHER__"]) if vehicles else [choose_key, "__OTHER__"]
+        def fmt(bc: str) -> str:
+            if bc == choose_key:
+                return "Choose a vehicle"
+            if bc == "__OTHER__":
+                return "Other / not listed"
+            return f"{bc} — {vehicles[bc].get('name','')} ({vehicles[bc].get('category','')})"
+        existing_bc = existing.get("vehicle_barcode")
+        if existing_bc in vehicles:
+            current_bc = existing_bc
+        elif existing_bc:
+            current_bc = "__OTHER__"
+        else:
+            current_bc = choose_key
         vbc = st.selectbox("Vehicle *", options, format_func=fmt, index=(options.index(current_bc) if current_bc in options else 0))
 
-        vehicle_data = vehicles.get(vbc, {}) if vbc != "__OTHER__" else {}
+        vehicle_data = vehicles.get(vbc, {}) if vbc not in {choose_key, "__OTHER__"} else {}
         expected_loc = vehicle_data.get("location", "")
-        if vbc == "__OTHER__":
+        if vbc == choose_key:
+            st.info("Choose a vehicle to continue.")
+            vbc = ""
+            vname = ""
+            vcat = ""
+            vdesc = ""
+            vmodel = ""
+            expected_loc = ""
+        elif vbc == "__OTHER__":
             st.info("Enter the new vehicle details; this will be stored with the shift.")
             vbc = st.text_input("Vehicle barcode *", value=str(existing.get("vehicle_barcode", "")), placeholder="Required")
             if "vehicle_barcode" in missing:
@@ -553,15 +669,19 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             vdesc = vehicle_data.get("description", "")
             vmodel = vehicle_data.get("model", "")
 
-        t_start_default = datetime.now().time().replace(second=0, microsecond=0) if not existing else time_cls.fromisoformat(existing.get("shift_start", "06:00"))
-        shift_hours_existing = float(existing.get("shift_hours", 12))
+        if existing:
+            t_start_default = time_cls.fromisoformat(existing.get("shift_start", "06:00"))
+            shift_hours_existing = float(existing.get("shift_hours", 12))
+        else:
+            t_start_default = time_cls.fromisoformat("06:00")
+            shift_hours_existing = 12
         if shift_hours_existing <= 0:
             shift_hours_existing = 12
         try:
-            base_dt = dt_on(datetime.fromisoformat(d).date(), time_cls.fromisoformat(existing.get("shift_start", "06:00")))
+            base_dt = dt_on(datetime.fromisoformat(d).date(), t_start_default)
             end_dt_default = (base_dt + timedelta(hours=shift_hours_existing)).time()
         except Exception:
-            end_dt_default = (datetime.now() + timedelta(hours=12)).time().replace(second=0, microsecond=0)
+            end_dt_default = time_cls.fromisoformat("18:00")
         t_start = st.time_input("Shift start *", value=t_start_default)
         if "shift_start" in missing:
             st.caption(":red[Required]")
@@ -570,7 +690,7 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             st.caption(":red[Required]")
         notes = st.text_area("Shift notes (optional)", value=str(existing.get("shift_notes", "")), height=90)
 
-        ok = st.form_submit_button("Save shift", type="primary", use_container_width=True)
+        ok = st.form_submit_button("Save shift", type="primary", width="stretch")
         if not ok:
             return
 
@@ -590,7 +710,7 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             st.error(" ".join(errs))
             return
 
-        saved = storage.upsert_shift({
+        payload = {
             "shift_date": d,
             "username": username,
             "client": client,
@@ -608,8 +728,12 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             "shift_start": t_start.strftime("%H:%M"),
             "shift_hours": shift_hours,
             "shift_notes": notes.strip() if notes.strip() else None,
-        })
+        }
+        if shift_id:
+            payload["shift_id"] = shift_id
+        saved = storage.upsert_shift(payload)
         st.session_state.latest_shift = saved
+        st.session_state.active_shift_id = saved.get("shift_id") or saved.get("id")
         st.session_state.view = "dd"
         st.success("Shift saved.")
         st.rerun()
@@ -626,11 +750,26 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
         code_list = ["LOG", "CAL", "SAF", "ADM", "MTG", "DWN", "OTH"]
         label_by = {c: c for c in code_list}
 
+    if st.button("Back to shift", type="secondary"):
+        st.session_state.view = "dd"
+        st.session_state.edit_activity_id = None
+        st.rerun()
+
     # Choose code outside the form so the UI re-renders immediately
     if "activity_code_select" not in st.session_state:
         st.session_state.activity_code_select = code_list[0]
     code_choice = st.selectbox("Code", code_list, index=code_list.index(st.session_state.activity_code_select) if st.session_state.activity_code_select in code_list else 0, key="activity_code_select")
     st.caption(f"**{code_choice}** — {label_by.get(code_choice, code_choice)}")
+
+    holes = storage.list_holes() if code_choice == "LOG" else []
+    holes_by_id = {h.get("hole_id"): h for h in holes if h.get("hole_id")}
+    use_existing_key = "use_existing_hole_add"
+    use_existing_hole = False
+    if code_choice == "LOG":
+        use_existing_hole = st.checkbox("Use existing hole", value=st.session_state.get(use_existing_key, False), key=use_existing_key)
+    else:
+        st.session_state.pop(use_existing_key, None)
+    use_existing_effective = use_existing_hole and bool(holes)
 
     d = datetime.fromisoformat(st.session_state.shift_date).date()
     shift_start = sh.get("shift_start", "06:00")
@@ -696,9 +835,9 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
         if end_default_id not in option_ids:
             end_default_id = default_end.isoformat()
         with c1:
-            start_id = st.selectbox("Start", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(start_default_id) if start_default_id in option_ids else 0, key="act_start_iso")
+            start_id = st.selectbox("Start", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s), d), index=option_ids.index(start_default_id) if start_default_id in option_ids else 0, key="act_start_iso")
         with c2:
-            end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(end_default_id) if end_default_id in option_ids else min(len(option_ids)-1, option_ids.index(start_default_id)+1 if start_default_id in option_ids else 1), key="act_end_iso")
+            end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s), d), index=option_ids.index(end_default_id) if end_default_id in option_ids else min(len(option_ids)-1, option_ids.index(start_default_id)+1 if start_default_id in option_ids else 1), key="act_end_iso")
 
         selected_tools: List[str] = []
         if code_choice in {"LOG", "CAL"}:
@@ -711,12 +850,31 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
         else:
             st.session_state.pop("tool_select_multi", None)
         hole_id = None
+        hole_name_new = None
+        selected_hole_id = None
+        rename_hole_name = None
         if code_choice == "LOG":
-            hole_input = st.text_input("Hole ID (LOG only)", placeholder="Leave blank to auto-generate a unique ID")
-            hole_id = hole_input.strip() if hole_input.strip() else None
+            st.markdown("#### Hole")
+            if use_existing_effective:
+                hole_ids = [h.get("hole_id") for h in holes if h.get("hole_id")]
+                default_id = hole_ids[0] if hole_ids else None
+                selected_hole_id = st.selectbox(
+                    "Select existing hole",
+                    hole_ids,
+                    format_func=lambda hid: hole_option_label(holes_by_id.get(hid, {})),
+                    index=hole_ids.index(default_id) if default_id in hole_ids else 0,
+                    key="existing_hole_select_add",
+                )
+                current_name = (holes_by_id.get(selected_hole_id, {}) or {}).get("hole_name") or ""
+                rename_hole_name = st.text_input("Rename selected hole (optional)", value=str(current_name), key="existing_hole_rename_add")
+                st.caption("Renaming updates all activities linked to this hole.")
+            else:
+                if use_existing_hole and not holes:
+                    st.info("No existing holes yet. Create a new hole.")
+                hole_name_new = st.text_input("Hole name (LOG only) *", placeholder="Required", key="new_hole_name_add")
         notes = st.text_area("Notes (optional)", height=80)
 
-        ok = st.form_submit_button("Add activity", type="primary", use_container_width=True)
+        ok = st.form_submit_button("Add activity", type="primary", width="stretch")
         if not ok:
             return
 
@@ -733,18 +891,39 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
             except Exception:
                 continue
             if max(a0, e0) < min(a1, e1):
-                st.error(f"Time conflict with {existing.get('code')} — {existing.get('label')} ({existing.get('start_ts')} → {existing.get('end_ts')}).")
+                st.error(f"Time conflict with {existing.get('code')} — {existing.get('label')} ({format_dt(e0)} → {format_dt(e1)}).")
                 return
 
-        storage.add_activity(st.session_state.shift_date, st.session_state.username, {
-            "start_ts": a0.isoformat(timespec="seconds"),
-            "end_ts": a1.isoformat(timespec="seconds"),
-            "code": code_choice,
-            "label": label_by.get(code_choice, code_choice),
-            "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else None),
-            "hole_id": hole_id,
-            "notes": notes.strip() if notes.strip() else None,
-        })
+        if code_choice == "LOG":
+            if use_existing_effective:
+                hole_id = selected_hole_id
+                if rename_hole_name is not None:
+                    if rename_hole_name.strip() and rename_hole_name.strip() != str((holes_by_id.get(hole_id, {}) or {}).get("hole_name") or ""):
+                        storage.update_hole_name(hole_id, rename_hole_name.strip())
+            else:
+                hole_name_new = (hole_name_new or "").strip()
+                if not hole_name_new:
+                    st.error("Hole name is required for a new hole.")
+                    return
+                hole_id = storage.create_hole(hole_name_new)
+        else:
+            hole_id = None
+
+        storage.add_activity(
+            st.session_state.shift_date,
+            st.session_state.username,
+            {
+                "start_ts": a0.isoformat(timespec="seconds"),
+                "end_ts": a1.isoformat(timespec="seconds"),
+                "code": code_choice,
+                "label": label_by.get(code_choice, code_choice),
+                "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else None),
+                "hole_id": hole_id,
+                "hole_name": (hole_name_new.strip() if hole_name_new else None),
+                "notes": notes.strip() if notes.strip() else None,
+            },
+            shift_id=sh.get("shift_id") or sh.get("id"),
+        )
         st.session_state.view = "dd"
         st.success("Activity added.")
         st.rerun()
@@ -761,28 +940,45 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         code_list = ["LOG", "CAL", "SAF", "ADM", "MTG", "DWN", "OTH"]
         label_by = {c: c for c in code_list}
 
+    code_choice = str(act.get("code") or (code_list[0] if code_list else ""))
+    if code_choice not in label_by and code_choice.upper() in label_by:
+        code_choice = code_choice.upper()
+    label_val = act.get("label") or label_by.get(code_choice, code_choice)
+
+    st.markdown(f"## {activity_title(act, sh)}")
+    st.caption(f"Activity window: {format_dt_value(act.get('start_ts'))} → {format_dt_value(act.get('end_ts'))}")
+    nav_l, nav_r = st.columns([1, 1])
+    with nav_l:
+        if st.button("Back to shift", type="secondary"):
+            st.session_state.view = "dd"
+            st.session_state.edit_activity_id = None
+            st.rerun()
+    with nav_r:
+        st.caption(f"Code locked: {code_choice} — {label_val}")
+    code_note = "To change the code, delete this activity and create a new one."
+    if code_choice == "LOG":
+        code_note += " Logging activities can only be deleted on the same day."
+    st.caption(code_note)
+
+    holes = storage.list_holes() if code_choice == "LOG" else []
+    holes_by_id = {h.get("hole_id"): h for h in holes if h.get("hole_id")}
+    use_existing_key = f"use_existing_hole_edit_{act.get('id')}"
+    default_use_existing = True if act.get("hole_id") or holes else False
+    use_existing_hole = default_use_existing
+    if code_choice == "LOG":
+        use_existing_hole = st.checkbox("Use existing hole", value=st.session_state.get(use_existing_key, default_use_existing), key=use_existing_key)
+    else:
+        st.session_state.pop(use_existing_key, None)
+    use_existing_effective = use_existing_hole and bool(holes)
+
     d = datetime.fromisoformat(st.session_state.shift_date).date()
     shift_start = sh.get("shift_start", "06:00")
     shift_hours = float(sh.get("shift_hours", 12))
     options = time_options(d, shift_start, shift_hours)
     option_ids = [o.isoformat() for o in options]
 
-    code_default = act.get("code") or code_list[0]
-    code_choice = st.selectbox("Code", code_list, index=(code_list.index(code_default) if code_default in code_list else 0), key="edit_code_select")
-    st.caption(f"**{code_choice}** — {label_by.get(code_choice, code_choice)}")
-
-    if st.button("Cancel editing", type="secondary"):
-        st.session_state.view = "dd"
-        st.session_state.edit_activity_id = None
-        st.rerun()
-
-    if code_choice == "LOG":
-        if st.button("Well report", key=f"wr_open_{act.get('id')}", use_container_width=True):
-            st.session_state.well_report_activity_id = int(act.get("id"))
-            st.session_state.view = "well_report"
-            st.rerun()
-
     with st.form("edit_act_form", clear_on_submit=False):
+        st.markdown("### Activity details")
         c1, c2 = st.columns([1.0, 1.0])
         start_iso = act.get("start_ts") or (act.get("start_time") if act else None)
         end_iso = act.get("end_ts") or (act.get("end_time") if act else None)
@@ -791,11 +987,12 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         if end_iso not in option_ids:
             end_iso = option_ids[min(len(option_ids) - 1, option_ids.index(start_iso) + 1)]
         with c1:
-            start_id = st.selectbox("Start", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(start_iso), key="edit_act_start_iso")
+            start_id = st.selectbox("Start", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s), d), index=option_ids.index(start_iso), key="edit_act_start_iso")
         with c2:
-            end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s)), index=option_ids.index(end_iso), key="edit_act_end_iso")
+            end_id = st.selectbox("End", option_ids, format_func=lambda s: format_time(datetime.fromisoformat(s), d), index=option_ids.index(end_iso), key="edit_act_end_iso")
 
         selected_tools: List[str] = []
+        tool_val = act.get("tool")
         if code_choice in {"LOG", "CAL"}:
             existing_tools = []
             if act.get("tool"):
@@ -804,19 +1001,42 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
             if not isinstance(default_tools, list):
                 default_tools = existing_tools
             selected_tools = st.multiselect("Tools (LOG/CAL only)", tools, default=default_tools, key="tool_select_edit_multi")
+            tool_val = ", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else None
         else:
             st.session_state.pop("tool_select_edit_multi", None)
 
-        hole_id_val = act.get("hole_id")
+        hole_id_val = None
+        hole_name_new = None
+        selected_hole_id = None
+        rename_hole_name = None
         if code_choice == "LOG":
-            hole_input = st.text_input("Hole ID (LOG only)", value=str(act.get("hole_id") or ""), placeholder="Leave blank to auto-generate a unique ID")
-            hole_id_val = hole_input.strip() if hole_input.strip() else None
+            st.markdown("#### Hole")
+            if use_existing_effective:
+                hole_ids = [h.get("hole_id") for h in holes if h.get("hole_id")]
+                default_id = act.get("hole_id") if act.get("hole_id") in hole_ids else (hole_ids[0] if hole_ids else None)
+                selected_hole_id = st.selectbox(
+                    "Select existing hole",
+                    hole_ids,
+                    format_func=lambda hid: hole_option_label(holes_by_id.get(hid, {})),
+                    index=hole_ids.index(default_id) if default_id in hole_ids else 0,
+                    key=f"existing_hole_select_edit_{act.get('id')}",
+                )
+                current_name = (holes_by_id.get(selected_hole_id, {}) or {}).get("hole_name") or ""
+                rename_hole_name = st.text_input(
+                    "Rename selected hole (optional)",
+                    value=str(current_name),
+                    key=f"existing_hole_rename_edit_{act.get('id')}",
+                )
+                st.caption("Renaming updates all activities linked to this hole.")
+            else:
+                if use_existing_hole and not holes:
+                    st.info("No existing holes yet. Create a new hole.")
+                default_name = act.get("hole_name") or ""
+                hole_name_new = st.text_input("Hole name (LOG only) *", value=str(default_name), placeholder="Required", key=f"new_hole_name_edit_{act.get('id')}")
         notes = st.text_area("Notes (optional)", height=80, value=str(act.get("notes") or ""))
 
-        ok = st.form_submit_button("Save changes", type="primary", use_container_width=True)
-        if not ok:
-            return
-
+        ok = st.form_submit_button("Save changes", type="primary", width="stretch")
+    if ok:
         a0 = datetime.fromisoformat(start_id)
         a1 = datetime.fromisoformat(end_id)
         if a1 <= a0:
@@ -832,31 +1052,173 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
             except Exception:
                 continue
             if max(a0, e0) < min(a1, e1):
-                st.error(f"Time conflict with {existing.get('code')} — {existing.get('label')} ({existing.get('start_ts')} → {existing.get('end_ts')}).")
+                st.error(f"Time conflict with {existing.get('code')} — {existing.get('label')} ({format_dt(e0)} → {format_dt(e1)}).")
                 return
 
-        storage.update_activity(st.session_state.shift_date, st.session_state.username, int(act.get("id")), {
-            "start_ts": a0.isoformat(timespec="seconds"),
-            "end_ts": a1.isoformat(timespec="seconds"),
-            "code": code_choice,
-            "label": label_by.get(code_choice, code_choice),
-            "tool": (", ".join([t for t in selected_tools if str(t).strip()]) if selected_tools else (act.get("tool") if code_choice not in {"LOG", "CAL"} else None)),
-            "hole_id": hole_id_val,
-            "notes": notes.strip() if notes.strip() else None,
-        })
+        if code_choice == "LOG":
+            if use_existing_effective:
+                hole_id_val = selected_hole_id
+                if rename_hole_name is not None:
+                    current_name = str((holes_by_id.get(hole_id_val, {}) or {}).get("hole_name") or "")
+                    if rename_hole_name.strip() and rename_hole_name.strip() != current_name:
+                        storage.update_hole_name(hole_id_val, rename_hole_name.strip())
+            else:
+                hole_name_new = (hole_name_new or "").strip()
+                if not hole_name_new:
+                    st.error("Hole name is required for a new hole.")
+                    return
+                hole_id_val = storage.create_hole(hole_name_new)
+        else:
+            hole_id_val = None
+
+        storage.update_activity(
+            st.session_state.shift_date,
+            st.session_state.username,
+            int(act.get("id")),
+            {
+                "start_ts": a0.isoformat(timespec="seconds"),
+                "end_ts": a1.isoformat(timespec="seconds"),
+                "code": code_choice,
+                "label": label_val,
+                "tool": tool_val if code_choice in {"LOG", "CAL"} else act.get("tool"),
+                "hole_id": hole_id_val,
+                "hole_name": (hole_name_new.strip() if hole_name_new else None),
+                "notes": notes.strip() if notes.strip() else None,
+            },
+            shift_id=sh.get("shift_id") or sh.get("id"),
+        )
+        if code_choice == "LOG":
+            storage.finalize_activity_files(int(act.get("id")))
         st.session_state.view = "dd"
         st.session_state.edit_activity_id = None
         st.success("Activity updated.")
         st.rerun()
 
+    if code_choice == "LOG":
+        st.divider()
+        st.markdown("### Log files")
+        files = storage.list_activity_files(int(act.get("id")))
+        upload_key = f"log_files_{act.get('id')}"
+        uploaded_files = st.file_uploader("Attach files", accept_multiple_files=True, key=upload_key)
+        if st.button("Upload files", key=f"upload_files_{act.get('id')}", width="stretch"):
+            if not uploaded_files:
+                st.warning("Select one or more files to upload.")
+            else:
+                uploaded_ok = 0
+                for f in uploaded_files:
+                    data = f.getvalue()
+                    if not data:
+                        continue
+                    try:
+                        storage.add_activity_file(
+                            int(act.get("id")),
+                            st.session_state.username,
+                            f.name,
+                            data,
+                            shift_id=sh.get("shift_id") or sh.get("id"),
+                            status="pending",
+                        )
+                        uploaded_ok += 1
+                    except Exception as exc:
+                        st.error(f"{f.name}: {exc}")
+                if uploaded_ok:
+                    st.session_state.pop(upload_key, None)
+                    st.success("Files uploaded as pending. Save changes to attach them.")
+                    st.rerun()
+                else:
+                    st.warning("No files were uploaded.")
 
-def well_report_view(act: Dict[str, Any]):
+        if files:
+            for f in files:
+                status = (f.get("status") or "active").lower()
+                size = int(f.get("file_size") or 0)
+                uploaded_at = format_dt_value(f.get("uploaded_at")) if f.get("uploaded_at") else ""
+                label = f"{f.get('file_name')} ({format_bytes(size)})"
+                if uploaded_at:
+                    label = f"{label} · {uploaded_at}"
+                status_label = {
+                    "pending": "Pending upload — save changes to attach",
+                    "active": "Active",
+                    "redundant": "Redundant (can restore)",
+                }.get(status, status)
+                with st.container(border=True):
+                    st.markdown(f"**{label}**")
+                    st.caption(f"Status: {status_label}")
+                    file_bytes = storage.get_activity_file_bytes(int(f.get("id")))
+                    c_dl, c_act = st.columns([1, 1])
+                    with c_dl:
+                        if file_bytes is None:
+                            st.caption("Download unavailable.")
+                        else:
+                            st.download_button(
+                                "Download",
+                                data=file_bytes,
+                                file_name=f.get("file_name") or "attachment",
+                                mime="application/octet-stream",
+                                key=f"download_file_{f.get('id')}",
+                                width="stretch",
+                            )
+                    with c_act:
+                        if status == "pending":
+                            if st.button("Remove (pending)", key=f"remove_file_{f.get('id')}", help="Remove pending file", width="stretch"):
+                                storage.delete_activity_file(int(f.get("id")))
+                                st.rerun()
+                        elif status == "active":
+                            if st.button("Mark redundant", key=f"redundant_file_{f.get('id')}", width="stretch"):
+                                storage.mark_activity_file_redundant(int(f.get("id")))
+                                st.rerun()
+                        elif status == "redundant":
+                            if st.button("Mark relevant", key=f"relevant_file_{f.get('id')}", width="stretch"):
+                                storage.mark_activity_file_active(int(f.get("id")))
+                                st.rerun()
+                        else:
+                            st.caption("No actions.")
+
+        st.divider()
+        well_report_view(act, embedded=True)
+
+        with st.expander("Advanced (internal)"):
+            st.text_input("Hole ID (internal)", value=str(act.get("hole_id") or ""), disabled=True, key=f"hole_id_readonly_{act.get('id')}")
+
+    st.divider()
+    st.markdown("### Delete activity")
+    is_log = code_choice == "LOG"
+    try:
+        shift_day = datetime.fromisoformat(st.session_state.shift_date).date()
+    except Exception:
+        shift_day = date_cls.today()
+    is_today = shift_day == date_cls.today()
+    if is_log and not is_today:
+        st.warning("Logging activities can only be deleted on the day they occur. Edit this entry instead.")
+        return
+    if is_log:
+        st.warning("Deleting a Logging activity removes all attached files and any well report data. This cannot be undone.")
+    else:
+        st.caption("This cannot be undone.")
+    confirm_key = f"confirm_delete_{act.get('id')}"
+    confirm = st.checkbox("I understand this will permanently delete the activity.", key=confirm_key)
+    if st.button("Delete activity", type="secondary", help="Delete activity permanently", disabled=not confirm, width="stretch"):
+        storage.delete_activity(
+            st.session_state.shift_date,
+            st.session_state.username,
+            int(act.get("id")),
+            shift_id=sh.get("shift_id") or sh.get("id"),
+        )
+        st.session_state.view = "dd"
+        st.session_state.edit_activity_id = None
+        st.success("Activity deleted.")
+        st.rerun()
+
+
+def well_report_view(act: Dict[str, Any], embedded: bool = False):
     """Render the well report editor for a LOG activity."""
     if not act or act.get("code") != "LOG":
         st.warning("Well report is only available for LOG activities.")
-        st.session_state.view = "dd"
-        st.session_state.well_report_activity_id = None
-        st.rerun()
+        if not embedded:
+            st.session_state.view = "dd"
+            st.session_state.well_report_activity_id = None
+            st.rerun()
+        return
 
     tools = [t.strip() for t in str(act.get("tool") or "").split(",") if t.strip()]
     aid = int(act.get("id"))
@@ -875,8 +1237,11 @@ def well_report_view(act: Dict[str, Any]):
     hangups = st.session_state.get(hang_key, [])
     calibrations = st.session_state.get(calib_key, [])
 
-    st.markdown(f"## Well report — {act.get('label')} ({act.get('code')})")
-    st.caption("IN DEVELOPMENT")
+    if embedded:
+        st.markdown("### Well report")
+    else:
+        st.markdown(f"## Well report — {act.get('label')} ({act.get('code')})")
+        st.caption("IN DEVELOPMENT")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -893,13 +1258,13 @@ def well_report_view(act: Dict[str, Any]):
         elev = st.number_input("Elevation", value=float(data.get("elevation") or 0.0), step=0.1, format="%.2f", key=f"wr_elev_{aid}")
         drill = st.number_input("Drill Depth", value=float(data.get("drill_depth") or 0.0), step=1.0, format="%.2f", key=f"wr_drill_{aid}")
         log_depth = st.number_input("Log Depth", value=float(data.get("log_depth") or 0.0), step=1.0, format="%.2f", key=f"wr_log_{aid}")
-    hole_id = st.text_input("Hole ID", value=str(data.get("hole_id", "")), key=f"wr_hole_{aid}")
+    hole_name = st.text_input("Hole name", value=str(data.get("hole_name", "")), key=f"wr_hole_{aid}")
 
     st.markdown("**Hangup depths (per tool)**")
-    hangups = st.data_editor(hangups or hangup_table_defaults(tools), key=f"wr_hang_table_{aid}", num_rows="dynamic", use_container_width=True)
+    hangups = st.data_editor(hangups or hangup_table_defaults(tools), key=f"wr_hang_table_{aid}", num_rows="dynamic", width="stretch")
 
     st.markdown("**Calibration details** (leave blank if none)")
-    calibrations = st.data_editor(calibrations or [], key=f"wr_calib_table_{aid}", num_rows="dynamic", use_container_width=True)
+    calibrations = st.data_editor(calibrations or [], key=f"wr_calib_table_{aid}", num_rows="dynamic", width="stretch")
 
     st.markdown("**DGPS**")
     c3, c4, c5 = st.columns(3)
@@ -928,7 +1293,7 @@ def well_report_view(act: Dict[str, Any]):
         "elevation": elev,
         "drill_depth": drill,
         "log_depth": log_depth,
-        "hole_id": hole_id,
+        "hole_name": hole_name,
         "comments": comments,
         "inj_development": "IN DEVELOPMENT",
         "dgps_easting": dgps_e,
@@ -951,11 +1316,18 @@ def well_report_view(act: Dict[str, Any]):
     st.session_state[hang_key] = hangups
     st.session_state[calib_key] = calibrations
 
-    btn1, btn2, btn3 = st.columns([1, 1, 1])
-    save_clicked = btn1.button("Save", type="primary", use_container_width=True)
-    dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
-    btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    exit_clicked = btn3.button("Exit", type="secondary", use_container_width=True)
+    if embedded:
+        btn1, btn2 = st.columns([1, 1])
+        save_clicked = btn1.button("Save report", type="primary", width="stretch")
+        dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
+        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        exit_clicked = False
+    else:
+        btn1, btn2, btn3 = st.columns([1, 1, 1])
+        save_clicked = btn1.button("Save", type="primary", width="stretch")
+        dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
+        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        exit_clicked = btn3.button("Exit", type="secondary", width="stretch")
 
     if save_clicked:
         st.success("Well report saved.")
@@ -984,24 +1356,83 @@ def main():
     topbar()
     st.divider()
 
-    sh = storage.get_shift(st.session_state.shift_date, st.session_state.username)
+    def shift_date_label() -> str:
+        try:
+            d = datetime.fromisoformat(st.session_state.shift_date).date()
+            return format_dt_value(d)
+        except Exception:
+            return str(st.session_state.shift_date)
+
+    shifts = storage.list_shifts(st.session_state.shift_date, st.session_state.username)
+
+    if st.session_state.get("view") == "create_shift":
+        st.markdown(f"## Create shift for {st.session_state.get('username')} on {shift_date_label()}")
+        shift_form(vehicles, site_options, form_key="shift_form_create_extra")
+        return
+
+    if not shifts:
+        st.markdown(f"## Create shift for {st.session_state.get('username')} on {shift_date_label()}")
+        shift_form(vehicles, site_options, form_key="shift_form_create")
+        return
+
+    active_shift_id = st.session_state.get("active_shift_id")
+    sh = None
+    if active_shift_id is not None:
+        sh = next((s for s in shifts if str(s.get("shift_id")) == str(active_shift_id)), None)
+    if sh is None:
+        sh = max(shifts, key=lambda s: s.get("updated_at") or s.get("created_at") or "")
+        st.session_state.active_shift_id = sh.get("shift_id") or sh.get("id")
+
     latest = st.session_state.get("latest_shift")
-    if latest and latest.get("shift_date") == st.session_state.shift_date and latest.get("username") == st.session_state.username:
-        if not sh or latest.get("updated_at") >= sh.get("updated_at", ""):
+    if latest and str(latest.get("shift_id")) == str(sh.get("shift_id")):
+        if latest.get("updated_at") >= sh.get("updated_at", ""):
             sh = latest
+
+    if st.session_state.get("view") == "switch_shift":
+        st.markdown(f"## Switch shift for {st.session_state.get('username')} on {shift_date_label()}")
+        if st.button("Create new shift", type="primary", width="stretch"):
+            st.session_state.view = "create_shift"
+            st.session_state.active_shift_id = None
+            st.session_state.edit_activity_id = None
+            st.session_state.well_report_activity_id = None
+            st.rerun()
+        for s in shifts:
+            site_display = s.get("site_other") if s.get("site") == "Other" and s.get("site_other") else s.get("site")
+            try:
+                s_start = dt_on(datetime.fromisoformat(s.get("shift_date")).date(), time_cls.fromisoformat(s.get("shift_start")))
+                s_end = s_start + timedelta(hours=float(s.get("shift_hours", 12)))
+                s_start_str = format_dt(s_start)
+                s_end_str = format_dt(s_end)
+            except Exception:
+                s_start_str = "—"
+                s_end_str = "—"
+            is_active = str(s.get("shift_id")) == str(st.session_state.get("active_shift_id"))
+            with st.container(border=True):
+                st.markdown(f"**{s_start_str} → {s_end_str}** · {s.get('client')} · {site_display} · Job #: {s.get('job_number')}")
+                st.caption(f"Vehicle: {s.get('vehicle_name')} (#{s.get('vehicle_barcode')})")
+                if is_active:
+                    st.caption("Current shift")
+                if st.button("Select", key=f"select_shift_{s.get('shift_id')}", width="stretch"):
+                    st.session_state.active_shift_id = s.get("shift_id")
+                    st.session_state.view = "dd"
+                    st.session_state.edit_activity_id = None
+                    st.session_state.well_report_activity_id = None
+                    st.rerun()
+        return
+
     if sh:
         patched, changed = fill_shift_defaults(sh, vehicles, site_options)
         if changed and patched:
             sh = storage.upsert_shift(patched)
-    if sh is None:
-        st.markdown("## Create shift")
-        st.info("One shift per user per day. Client + site + job number + vehicle are required.")
-        shift_form(vehicles, site_options, form_key="shift_form_create")
-        return
+            st.session_state.latest_shift = sh
+            st.session_state.active_shift_id = sh.get("shift_id") or sh.get("id")
 
     if not is_shift_complete(sh):
         missing = missing_shift_fields(sh)
         st.markdown("## Complete shift details")
+        if st.button("Switch shift", width="stretch"):
+            st.session_state.view = "switch_shift"
+            st.rerun()
         st.warning("Fill in all shift details before adding or viewing activities.")
         if missing:
             human = {
@@ -1019,26 +1450,55 @@ def main():
         shift_form(vehicles, site_options, existing=sh, missing=missing, form_key="shift_form_incomplete")
         return
 
+    acts = storage.list_activities(
+        st.session_state.shift_date,
+        st.session_state.username,
+        shift_id=sh.get("shift_id") or sh.get("id"),
+    )
+
+    if st.session_state.get("view") == "well_report":
+        if st.session_state.get("well_report_activity_id") and not st.session_state.get("edit_activity_id"):
+            st.session_state.edit_activity_id = st.session_state.get("well_report_activity_id")
+        st.session_state.view = "edit_activity"
+        st.session_state.well_report_activity_id = None
+
+    if st.session_state.get("view") == "edit_activity":
+        target = next((a for a in acts if a.get("id") == st.session_state.get("edit_activity_id")), None)
+        if target:
+            edit_activity_form(catalog, sh, acts, target)
+        else:
+            st.warning("No activity found to edit.")
+            st.session_state.view = "dd"
+            st.session_state.edit_activity_id = None
+        return
+
+    if st.session_state.get("view") == "add_activity":
+        st.markdown("## Add activity")
+        add_activity_form(catalog, sh, acts)
+        return
+
     site_display = sh.get("site_other") if sh.get("site") == "Other" and sh.get("site_other") else sh.get("site")
     try:
         start_dt = dt_on(datetime.fromisoformat(sh.get("shift_date")).date(), time_cls.fromisoformat(sh.get("shift_start")))
         end_dt = start_dt + timedelta(hours=float(sh.get("shift_hours", 12)))
-        end_str = end_dt.strftime("%H:%M")
+        start_str = format_dt(start_dt)
+        end_str = format_dt(end_dt)
     except Exception:
+        start_str = "—"
         end_str = "—"
     with st.container():
-        col_info, col_edit = st.columns([4, 1], vertical_alignment="center")
+        col_info, col_edit = st.columns([4, 1.2], vertical_alignment="center")
         with col_info:
             st.markdown(
                 f"""
                 <div class="card">
-                  <div class="title-md">{st.session_state.get('username', sh.get('username'))} — {datetime.fromisoformat(sh.get('shift_date')).strftime('%a %d %b %Y')}</div>
+                  <div class="title-md">{st.session_state.get('username', sh.get('username'))} — {format_dt_value(sh.get('shift_date'))}</div>
                   <div class="muted" style="margin-bottom:6px;">Location: {site_display}</div>
                   <div class="tight-row">
                     <span class="pill">Client: {sh.get('client')}</span>
                     <span class="pill">Job #: {sh.get('job_number')}</span>
                     <span class="pill">Vehicle: {sh.get('vehicle_name')} (#{sh.get('vehicle_barcode')})</span>
-                    <span class="pill">Start: {sh.get('shift_start')}</span>
+                    <span class="pill">Start: {start_str}</span>
                     <span class="pill">End: {end_str}</span>
                   </div>
                 </div>
@@ -1046,55 +1506,32 @@ def main():
                 unsafe_allow_html=True,
             )
         with col_edit:
-            if st.button("Edit shift", key="edit_shift_card", use_container_width=True):
+            if st.button("Switch shift", key="switch_shift_card", width="stretch"):
+                st.session_state.view = "switch_shift"
+                st.rerun()
+            if st.button("Edit shift", key="edit_shift_card", width="stretch"):
                 st.session_state.view = "edit_shift"
                 st.rerun()
     if sh.get("vehicle_location_mismatch"):
         st.warning(f"Vehicle location mismatch flagged. Expected: {sh.get('vehicle_location_expected')} · Actual: {sh.get('vehicle_location_actual')}")
 
-    acts = storage.list_activities(st.session_state.shift_date, st.session_state.username)
-
-    if st.session_state.get("view") == "well_report":
-        target_id = st.session_state.get("well_report_activity_id") or st.session_state.get("edit_activity_id")
-        target = next((a for a in acts if int(a.get("id")) == int(target_id)), None)
-        if target:
-            st.divider()
-            well_report_view(target)
-        else:
-            st.warning("No activity found for well report.")
-            st.session_state.view = "dd"
-            st.session_state.well_report_activity_id = None
-        return
-
     st.markdown("### Shift coverage")
     st.progress(shift_progress(sh, acts), text="Coverage of scheduled shift")
     st.caption("The bar fills as activities cover time inside the shift window.")
     st.markdown("#### Activity timeline")
-    highlight_id = st.session_state.get("edit_activity_id") if st.session_state.get("view") == "edit_activity" else None
-    activity_timeline(sh, acts, highlight_id=highlight_id)
+    activity_timeline(sh, acts, highlight_id=None)
 
     if st.session_state.get("view") == "edit_shift":
         st.divider()
         st.markdown("## Edit shift")
         shift_form(vehicles, site_options, existing=sh, form_key="shift_form_edit")
 
-    if st.session_state.get("view") == "add_activity":
-        st.divider()
-        st.markdown("## Add activity")
-        add_activity_form(catalog, sh, acts)
-    if st.session_state.get("view") == "edit_activity":
-        target = next((a for a in acts if a.get("id") == st.session_state.get("edit_activity_id")), None)
-        if target:
-            st.divider()
-            st.markdown("## Edit activity")
-            edit_activity_form(catalog, sh, acts, target)
-
     st.divider()
     hdr_l, hdr_r = st.columns([4, 1.3], vertical_alignment="center")
     with hdr_l:
         st.markdown("## Activities")
     with hdr_r:
-        if st.button("Add activity", type="primary", use_container_width=True):
+        if st.button("Add activity", type="primary", width="stretch"):
             st.session_state.view = "add_activity"
             st.session_state.edit_activity_id = None
             st.rerun()
@@ -1121,18 +1558,22 @@ def main():
         except Exception:
             a0 = a1 = None
             duration_min = 0
-        start_str = a0.strftime("%H:%M") if a0 else a.get("start_ts")
-        end_str = a1.strftime("%H:%M") if a1 else a.get("end_ts")
+        start_str = format_dt(a0) if a0 else format_dt_value(a.get("start_ts"))
+        end_str = format_dt(a1) if a1 else format_dt_value(a.get("end_ts"))
         dur_str = f"{duration_min//60}h {duration_min%60:02d}m"
         code = a.get("code")
         code_color = CODE_COLORS.get(code, "#6c7a89")
         code_pill = f"<span class='pill' style='background:{code_color}; color:white; border:none;'>{code}</span>"
         is_editing = st.session_state.get("edit_activity_id") == a.get("id") and st.session_state.get("view") == "edit_activity"
+        hole_display = format_hole_display(a.get("hole_name"), a.get("hole_id")) if str(code).upper() == "LOG" else None
+        label_text = a.get("label") or code or "Activity"
+        if str(code).upper() == "LOG" and hole_display:
+            label_text = f"{label_text} — {hole_display}"
         meta_bits = []
         if a.get("tool"):
             meta_bits.append(f"Tools: {a.get('tool')}")
-        if a.get("hole_id"):
-            meta_bits.append(f"Hole: {a.get('hole_id')}")
+        if (a.get("hole_name") or a.get("hole_id")) and str(code).upper() != "LOG":
+            meta_bits.append(f"Hole: {format_hole_display(a.get('hole_name'), a.get('hole_id'))}")
         if a.get("notes"):
             meta_bits.append("Notes")
 
@@ -1141,18 +1582,15 @@ def main():
                 st.markdown("<div style='background:rgba(255,210,77,0.15); padding:6px 8px; border-radius:10px;'>Editing this activity</div>", unsafe_allow_html=True)
             c_left, c_right = st.columns([6, 1], vertical_alignment="center")
             with c_left:
-                st.markdown(f"{code_pill} <strong>{a.get('label')}</strong><br/><span class='muted'>{start_str} → {end_str} • {dur_str}</span>", unsafe_allow_html=True)
+                st.markdown(f"{code_pill} <strong>{label_text}</strong><br/><span class='muted'>{start_str} → {end_str} • {dur_str}</span>", unsafe_allow_html=True)
                 if meta_bits:
                     st.caption(" · ".join(meta_bits))
                 if a.get("notes"):
                     st.write(a.get("notes"))
         with c_right:
-            if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", use_container_width=True):
+            if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", width="stretch"):
                 st.session_state.edit_activity_id = int(a.get("id"))
                 st.session_state.view = "edit_activity"
-                st.rerun()
-            if st.button("🗑️", key=f"del_{a.get('id')}", help="Delete activity", use_container_width=True):
-                storage.delete_activity(st.session_state.shift_date, st.session_state.username, int(a["id"]))
                 st.rerun()
 
     st.divider()
