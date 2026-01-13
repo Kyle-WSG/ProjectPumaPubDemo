@@ -438,7 +438,7 @@ def activity_timeline(shift: Dict[str, Any], acts: List[Dict[str, Any]], highlig
             tr.marker.line.width = 0
         if tr.name == "__editing__":
             tr.name = "Editing"
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def style(theme: str):
@@ -463,14 +463,14 @@ def style(theme: str):
             --wsg-border: {palette["border"]};
             --wsg-shadow: {palette["shadow"]};
           }}
-          body {{
+          body, .stApp, .stAppViewContainer {{
             background: radial-gradient(circle at 18% 22%, rgba(200,16,46,0.08), transparent 36%),
                         radial-gradient(circle at 82% 4%, rgba(241,147,30,0.10), transparent 38%),
                         var(--wsg-bg);
             color: var(--wsg-text);
           }}
           /* Extra top padding so content clears the Streamlit deploy bar */
-          .block-container {{padding-top: 3.8rem; padding-bottom: 3rem; max-width: 1200px;}}
+          .block-container {{padding-top: 3.8rem; padding-bottom: 3rem; max-width: 1200px; margin-left: auto; margin-right: auto;}}
           .card {{background: var(--wsg-card); border:1px solid var(--wsg-border); border-radius: 18px; padding: 16px; box-shadow: var(--wsg-shadow); backdrop-filter: blur(6px);}}
           .pill {{border-radius: 999px; padding: 6px 12px; background: rgba(0,0,0,0.04); font-size: 0.85rem; display: inline-block; margin-right: 6px; margin-bottom: 6px; color: var(--wsg-muted); border: 1px solid var(--wsg-border);}}
           .muted {{opacity:0.82; color: var(--wsg-muted);}}
@@ -553,7 +553,7 @@ def login(users: List[str]):
     st.markdown("<div class='title-lg'>Project Puma</div>", unsafe_allow_html=True)
     st.caption("Wireline daily diary — log shifts and activities.")
     user = st.selectbox("User", users)
-    if st.button("Enter", type="primary", width="stretch"):
+    if st.button("Enter", type="primary", use_container_width=True):
         st.session_state.username = user
         st.session_state.shift_date = iso(date_cls.today())
         st.session_state.view = "dd"
@@ -574,21 +574,21 @@ def topbar():
         with c_user:
             st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{st.session_state.username}</div>", unsafe_allow_html=True)
         with c_prev:
-            if st.button("◀", width="stretch"):
+            if st.button("◀", use_container_width=True):
                 set_shift_date(d - timedelta(days=1))
                 st.rerun()
         with c_date:
             st.markdown(f"<div class='title-md' style='text-align:center; padding:8px 0; display:flex; align-items:center; justify-content:center;'>{format_dt_value(d)}</div>", unsafe_allow_html=True)
         with c_next:
-            if st.button("▶", width="stretch"):
+            if st.button("▶", use_container_width=True):
                 set_shift_date(d + timedelta(days=1))
                 st.rerun()
         with c_today:
-            if st.button("Today", width="stretch"):
+            if st.button("Today", use_container_width=True):
                 set_shift_date(date_cls.today())
                 st.rerun()
         with c_logout:
-            if st.button("Log out", width="stretch"):
+            if st.button("Log out", use_container_width=True):
                 for k in ["username", "shift_date", "view", "edit_activity_id", "activity_code_select", "act_start_iso", "act_end_iso", "active_shift_id", "latest_shift", "well_report_activity_id"]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -690,7 +690,7 @@ def shift_form(vehicles: Dict[str, Dict[str, str]], site_options: List[str], exi
             st.caption(":red[Required]")
         notes = st.text_area("Shift notes (optional)", value=str(existing.get("shift_notes", "")), height=90)
 
-        ok = st.form_submit_button("Save shift", type="primary", width="stretch")
+        ok = st.form_submit_button("Save shift", type="primary", use_container_width=True)
         if not ok:
             return
 
@@ -874,7 +874,7 @@ def add_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[Di
                 hole_name_new = st.text_input("Hole name (LOG only) *", placeholder="Required", key="new_hole_name_add")
         notes = st.text_area("Notes (optional)", height=80)
 
-        ok = st.form_submit_button("Add activity", type="primary", width="stretch")
+        ok = st.form_submit_button("Add activity", type="primary", use_container_width=True)
         if not ok:
             return
 
@@ -1035,7 +1035,7 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
                 hole_name_new = st.text_input("Hole name (LOG only) *", value=str(default_name), placeholder="Required", key=f"new_hole_name_edit_{act.get('id')}")
         notes = st.text_area("Notes (optional)", height=80, value=str(act.get("notes") or ""))
 
-        ok = st.form_submit_button("Save changes", type="primary", width="stretch")
+        ok = st.form_submit_button("Save changes", type="primary", use_container_width=True)
     if ok:
         a0 = datetime.fromisoformat(start_id)
         a1 = datetime.fromisoformat(end_id)
@@ -1100,7 +1100,7 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         files = storage.list_activity_files(int(act.get("id")))
         upload_key = f"log_files_{act.get('id')}"
         uploaded_files = st.file_uploader("Attach files", accept_multiple_files=True, key=upload_key)
-        if st.button("Upload files", key=f"upload_files_{act.get('id')}", width="stretch"):
+        if st.button("Upload files", key=f"upload_files_{act.get('id')}", use_container_width=True):
             if not uploaded_files:
                 st.warning("Select one or more files to upload.")
             else:
@@ -1156,19 +1156,19 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
                                 file_name=f.get("file_name") or "attachment",
                                 mime="application/octet-stream",
                                 key=f"download_file_{f.get('id')}",
-                                width="stretch",
+                                use_container_width=True,
                             )
                     with c_act:
                         if status == "pending":
-                            if st.button("Remove (pending)", key=f"remove_file_{f.get('id')}", help="Remove pending file", width="stretch"):
+                            if st.button("Remove (pending)", key=f"remove_file_{f.get('id')}", help="Remove pending file", use_container_width=True):
                                 storage.delete_activity_file(int(f.get("id")))
                                 st.rerun()
                         elif status == "active":
-                            if st.button("Mark redundant", key=f"redundant_file_{f.get('id')}", width="stretch"):
+                            if st.button("Mark redundant", key=f"redundant_file_{f.get('id')}", use_container_width=True):
                                 storage.mark_activity_file_redundant(int(f.get("id")))
                                 st.rerun()
                         elif status == "redundant":
-                            if st.button("Mark relevant", key=f"relevant_file_{f.get('id')}", width="stretch"):
+                            if st.button("Mark relevant", key=f"relevant_file_{f.get('id')}", use_container_width=True):
                                 storage.mark_activity_file_active(int(f.get("id")))
                                 st.rerun()
                         else:
@@ -1197,7 +1197,7 @@ def edit_activity_form(catalog: Dict[str, Any], sh: Dict[str, Any], acts: List[D
         st.caption("This cannot be undone.")
     confirm_key = f"confirm_delete_{act.get('id')}"
     confirm = st.checkbox("I understand this will permanently delete the activity.", key=confirm_key)
-    if st.button("Delete activity", type="secondary", help="Delete activity permanently", disabled=not confirm, width="stretch"):
+    if st.button("Delete activity", type="secondary", help="Delete activity permanently", disabled=not confirm, use_container_width=True):
         storage.delete_activity(
             st.session_state.shift_date,
             st.session_state.username,
@@ -1261,10 +1261,10 @@ def well_report_view(act: Dict[str, Any], embedded: bool = False):
     hole_name = st.text_input("Hole name", value=str(data.get("hole_name", "")), key=f"wr_hole_{aid}")
 
     st.markdown("**Hangup depths (per tool)**")
-    hangups = st.data_editor(hangups or hangup_table_defaults(tools), key=f"wr_hang_table_{aid}", num_rows="dynamic", width="stretch")
+    hangups = st.data_editor(hangups or hangup_table_defaults(tools), key=f"wr_hang_table_{aid}", num_rows="dynamic", use_container_width=True)
 
     st.markdown("**Calibration details** (leave blank if none)")
-    calibrations = st.data_editor(calibrations or [], key=f"wr_calib_table_{aid}", num_rows="dynamic", width="stretch")
+    calibrations = st.data_editor(calibrations or [], key=f"wr_calib_table_{aid}", num_rows="dynamic", use_container_width=True)
 
     st.markdown("**DGPS**")
     c3, c4, c5 = st.columns(3)
@@ -1318,16 +1318,16 @@ def well_report_view(act: Dict[str, Any], embedded: bool = False):
 
     if embedded:
         btn1, btn2 = st.columns([1, 1])
-        save_clicked = btn1.button("Save report", type="primary", width="stretch")
+        save_clicked = btn1.button("Save report", type="primary", use_container_width=True)
         dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
-        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         exit_clicked = False
     else:
         btn1, btn2, btn3 = st.columns([1, 1, 1])
-        save_clicked = btn1.button("Save", type="primary", width="stretch")
+        save_clicked = btn1.button("Save", type="primary", use_container_width=True)
         dl_bytes = well_report_excel_bytes(updated_data, hangups, calibrations, dgps_data, comments)
-        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
-        exit_clicked = btn3.button("Exit", type="secondary", width="stretch")
+        btn2.download_button("Download (Excel)", data=dl_bytes, file_name="well_report_demo.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        exit_clicked = btn3.button("Exit", type="secondary", use_container_width=True)
 
     if save_clicked:
         st.success("Well report saved.")
@@ -1390,7 +1390,7 @@ def main():
 
     if st.session_state.get("view") == "switch_shift":
         st.markdown(f"## Switch shift for {st.session_state.get('username')} on {shift_date_label()}")
-        if st.button("Create new shift", type="primary", width="stretch"):
+        if st.button("Create new shift", type="primary", use_container_width=True):
             st.session_state.view = "create_shift"
             st.session_state.active_shift_id = None
             st.session_state.edit_activity_id = None
@@ -1412,7 +1412,7 @@ def main():
                 st.caption(f"Vehicle: {s.get('vehicle_name')} (#{s.get('vehicle_barcode')})")
                 if is_active:
                     st.caption("Current shift")
-                if st.button("Select", key=f"select_shift_{s.get('shift_id')}", width="stretch"):
+                if st.button("Select", key=f"select_shift_{s.get('shift_id')}", use_container_width=True):
                     st.session_state.active_shift_id = s.get("shift_id")
                     st.session_state.view = "dd"
                     st.session_state.edit_activity_id = None
@@ -1430,7 +1430,7 @@ def main():
     if not is_shift_complete(sh):
         missing = missing_shift_fields(sh)
         st.markdown("## Complete shift details")
-        if st.button("Switch shift", width="stretch"):
+        if st.button("Switch shift", use_container_width=True):
             st.session_state.view = "switch_shift"
             st.rerun()
         st.warning("Fill in all shift details before adding or viewing activities.")
@@ -1506,10 +1506,10 @@ def main():
                 unsafe_allow_html=True,
             )
         with col_edit:
-            if st.button("Switch shift", key="switch_shift_card", width="stretch"):
+            if st.button("Switch shift", key="switch_shift_card", use_container_width=True):
                 st.session_state.view = "switch_shift"
                 st.rerun()
-            if st.button("Edit shift", key="edit_shift_card", width="stretch"):
+            if st.button("Edit shift", key="edit_shift_card", use_container_width=True):
                 st.session_state.view = "edit_shift"
                 st.rerun()
     if sh.get("vehicle_location_mismatch"):
@@ -1531,7 +1531,7 @@ def main():
     with hdr_l:
         st.markdown("## Activities")
     with hdr_r:
-        if st.button("Add activity", type="primary", width="stretch"):
+        if st.button("Add activity", type="primary", use_container_width=True):
             st.session_state.view = "add_activity"
             st.session_state.edit_activity_id = None
             st.rerun()
@@ -1588,7 +1588,7 @@ def main():
                 if a.get("notes"):
                     st.write(a.get("notes"))
         with c_right:
-            if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", width="stretch"):
+            if st.button("✏️", key=f"edit_{a.get('id')}", help="Edit activity", use_container_width=True):
                 st.session_state.edit_activity_id = int(a.get("id"))
                 st.session_state.view = "edit_activity"
                 st.rerun()
